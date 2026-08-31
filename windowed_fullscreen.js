@@ -1,0 +1,313 @@
+const ROOT_ATTRIBUTE = "data-clean-window-fullscreen";
+const TARGET_ATTRIBUTE = "data-clean-window-fullscreen-target";
+const TAB_STRIP_ID = "clean-window-tab-strip";
+let fullscreenTarget = null;
+let savedScrollX = 0;
+let savedScrollY = 0;
+let lastToggleRequestAt = 0;
+const pausedMedia = new Set();
+
+function installStyles() {
+  if (document.getElementById("clean-window-fullscreen-style")) return;
+  const style = document.createElement("style");
+  style.id = "clean-window-fullscreen-style";
+  style.textContent = `
+    html[${ROOT_ATTRIBUTE}],
+    html[${ROOT_ATTRIBUTE}] body {
+      overflow: hidden !important;
+      background: #000 !important;
+    }
+
+    html[${ROOT_ATTRIBUTE}] body * {
+      visibility: hidden !important;
+    }
+
+    html[${ROOT_ATTRIBUTE}]::after {
+      content: "" !important;
+      position: fixed !important;
+      inset: 0 !important;
+      box-sizing: border-box !important;
+      border: 2px solid #d9b84f !important;
+      box-shadow: inset 0 0 4px rgba(217, 184, 79, 0.32) !important;
+      pointer-events: none !important;
+      z-index: 2147483647 !important;
+    }
+
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}],
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}] * {
+      visibility: visible !important;
+    }
+
+    #${TAB_STRIP_ID},
+    #${TAB_STRIP_ID} * {
+      visibility: visible !important;
+      box-sizing: border-box !important;
+    }
+
+    #${TAB_STRIP_ID} {
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
+      height: 34px !important;
+      display: flex !important;
+      align-items: center !important;
+      gap: 4px !important;
+      padding: 4px 6px !important;
+      overflow-x: auto !important;
+      overflow-y: hidden !important;
+      background: rgba(18, 18, 20, 0.96) !important;
+      border-bottom: 1px solid rgba(217, 184, 79, 0.72) !important;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.38) !important;
+      transform: translateY(-30px) !important;
+      transition: transform 150ms ease-out !important;
+      z-index: 2147483647 !important;
+      scrollbar-width: none !important;
+    }
+
+    #${TAB_STRIP_ID}::-webkit-scrollbar {
+      display: none !important;
+    }
+
+    #${TAB_STRIP_ID}:hover,
+    #${TAB_STRIP_ID}:focus-within {
+      transform: translateY(0) !important;
+    }
+
+    #${TAB_STRIP_ID} button {
+      flex: 0 1 210px !important;
+      min-width: 76px !important;
+      max-width: 210px !important;
+      height: 26px !important;
+      padding: 0 10px !important;
+      overflow: hidden !important;
+      border: 1px solid rgba(255, 255, 255, 0.1) !important;
+      border-radius: 6px !important;
+      outline: none !important;
+      background: rgba(255, 255, 255, 0.07) !important;
+      color: rgba(255, 255, 255, 0.76) !important;
+      font: 500 12px/24px system-ui, sans-serif !important;
+      text-align: left !important;
+      text-overflow: ellipsis !important;
+      white-space: nowrap !important;
+      cursor: pointer !important;
+    }
+
+    #${TAB_STRIP_ID} button:hover {
+      background: rgba(255, 255, 255, 0.14) !important;
+      color: #fff !important;
+    }
+
+    #${TAB_STRIP_ID} button[data-active="true"] {
+      border-color: rgba(217, 184, 79, 0.8) !important;
+      background: rgba(217, 184, 79, 0.18) !important;
+      color: #f4dfa0 !important;
+    }
+
+    [${TARGET_ATTRIBUTE}] {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      min-width: 100vw !important;
+      min-height: 100vh !important;
+      max-width: none !important;
+      max-height: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      transform: none !important;
+      z-index: 2147483646 !important;
+      background: #000 !important;
+    }
+
+    [${TARGET_ATTRIBUTE}] video {
+      position: absolute !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      margin: 0 !important;
+      object-fit: contain !important;
+      object-position: center center !important;
+      background: #000 !important;
+    }
+
+    [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {
+      position: absolute !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {
+      width: calc(100% - 24px) !important;
+      left: 12px !important;
+    }
+  `;
+  (document.head || document.documentElement).append(style);
+}
+
+function renderTabStrip(state) {
+  document.getElementById(TAB_STRIP_ID)?.remove();
+  if (!state?.active || !Array.isArray(state.tabs) || state.tabs.length < 2) return;
+
+  installStyles();
+  const strip = document.createElement("div");
+  strip.id = TAB_STRIP_ID;
+  strip.setAttribute("role", "tablist");
+  strip.dataset.mode = state.mode || "clean";
+
+  for (const tab of state.tabs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.dataset.tabId = String(tab.id);
+    button.dataset.active = String(Boolean(tab.active));
+    button.setAttribute("aria-selected", String(Boolean(tab.active)));
+    button.title = tab.title || "새 탭";
+    button.textContent = tab.title || "새 탭";
+    button.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "activate-clean-window-tab", tabId: tab.id }, (response) => {
+        if (chrome.runtime.lastError) {
+          strip.dataset.lastError = chrome.runtime.lastError.message;
+          return;
+        }
+        if (!response?.ok) strip.dataset.lastError = response?.error || "탭 전환에 실패했습니다.";
+      });
+    });
+    strip.append(button);
+  }
+
+  document.documentElement.append(strip);
+}
+
+function visibleArea(element) {
+  const rect = element.getBoundingClientRect();
+  if (rect.width < 80 || rect.height < 45) return 0;
+  const style = getComputedStyle(element);
+  if (style.display === "none" || style.visibility === "hidden") return 0;
+  return rect.width * rect.height;
+}
+
+function findFullscreenTarget() {
+  const youtubePlayer = document.querySelector("#movie_player.html5-video-player, #movie_player");
+  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return youtubePlayer;
+
+  const videos = [...document.querySelectorAll("video")]
+    .map((video) => ({ video, area: visibleArea(video) }))
+    .filter((item) => item.area > 0)
+    .sort((a, b) => b.area - a.area);
+  if (videos.length > 0) return videos[0].video;
+
+  // 영상이 없는 페이지도 popup 전체를 채울 수 있도록 페이지 자체를 사용한다.
+  return document.body || document.documentElement;
+}
+
+function setWindowedFullscreen(enabled) {
+  if (!enabled) {
+    document.documentElement.removeAttribute(ROOT_ATTRIBUTE);
+    fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
+    fullscreenTarget = null;
+    window.scrollTo(savedScrollX, savedScrollY);
+    window.dispatchEvent(new Event("resize"));
+    setTimeout(() => window.dispatchEvent(new Event("resize")), 80);
+    return { ok: true };
+  }
+
+  const target = findFullscreenTarget();
+  if (!target) return { ok: false, error: "표시할 페이지를 찾지 못했습니다." };
+
+  installStyles();
+  savedScrollX = window.scrollX;
+  savedScrollY = window.scrollY;
+  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
+  fullscreenTarget = target;
+  document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");
+  fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");
+  window.scrollTo(0, 0);
+  window.dispatchEvent(new Event("resize"));
+  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+  setTimeout(() => window.dispatchEvent(new Event("resize")), 80);
+  return { ok: true };
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "set-windowed-fullscreen") {
+    sendResponse(setWindowedFullscreen(Boolean(message.enabled)));
+    return false;
+  }
+  if (message?.type === "set-clean-window-shell") {
+    renderTabStrip(message);
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message?.type === "pause-clean-window-media") {
+    for (const media of document.querySelectorAll("video, audio")) {
+      if (!media.paused && !media.ended) {
+        pausedMedia.add(media);
+        media.pause();
+      }
+    }
+    sendResponse({ ok: true, paused: pausedMedia.size });
+    return false;
+  }
+  if (message?.type === "resume-clean-window-media") {
+    const mediaToResume = [...pausedMedia];
+    pausedMedia.clear();
+    for (const media of mediaToResume) {
+      if (media.isConnected && media.paused && !media.ended) media.play().catch(() => {});
+    }
+    sendResponse({ ok: true, resumed: mediaToResume.length });
+    return false;
+  }
+  return false;
+});
+
+chrome.runtime.sendMessage({ type: "get-clean-window-shell" }, (response) => {
+  if (chrome.runtime.lastError || !response?.ok) return;
+  renderTabStrip(response);
+});
+
+function isContainedFullscreenActive() {
+  return document.documentElement.hasAttribute(ROOT_ATTRIBUTE);
+}
+
+function keepFullscreenInsideWindow() {
+  if (!isContainedFullscreenActive() || !document.fullscreenElement) return;
+  document.exitFullscreen().catch(() => {});
+}
+
+// 사이트가 버튼이나 자체 단축키로 실제 모니터 전체화를 요청하더라도
+// 3번 모드에서는 현재 Chrome 창의 내부 전체화면으로 유지한다.
+document.addEventListener("fullscreenchange", keepFullscreenInsideWindow, true);
+document.addEventListener("webkitfullscreenchange", keepFullscreenInsideWindow, true);
+
+// 일부 Chrome popup에서 commands 이벤트가 누락될 때 사용하는 보조 입력 경로.
+document.addEventListener("keydown", (event) => {
+  if (isContainedFullscreenActive()
+      && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+      && event.key.toLowerCase() === "f") {
+    const target = event.target;
+    const isTyping = target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target?.isContentEditable;
+    if (!isTyping) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+  }
+
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (event.key.toLowerCase() !== "c") return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (event.repeat) return;
+  const now = Date.now();
+  if (now - lastToggleRequestAt < 500) return;
+  lastToggleRequestAt = now;
+  chrome.runtime.sendMessage({ type: "toggle-clean-window-request" });
+}, true);

@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Clean Window Toggle",
+  "version": "2.1.0",
+  "description": "주소창과 탭바를 숨기고, 작은 Chrome 창 안에서 영상과 웹페이지를 풀스크린처럼 집중해서 봅니다.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "tabGroups"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Clean Window로 전환",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "commands": {
+    "toggle-clean-window": {
+      "suggested_key": {
+        "windows": "Alt+C"
+      },
+      "description": "Clean Window 모드 전환"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["fullscreen_guard.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["windowed_fullscreen.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
