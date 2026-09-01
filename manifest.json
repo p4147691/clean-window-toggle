@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Clean Window Toggle",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "주소창과 탭바를 숨기고, 작은 Chrome 창 안에서 영상과 웹페이지를 풀스크린처럼 집중해서 봅니다.",
   "permissions": [
     "tabs",

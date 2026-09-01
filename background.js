@@ -432,6 +432,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     toggleCleanWindow(sender.tab?.windowId, sender.tab?.id).catch(console.error);
     return false;
   }
+  if (message?.type === "return-clean-window-normal-request") {
+    const popupId = sender.tab?.windowId;
+    const tabId = sender.tab?.id;
+    getSessions().then(async (sessions) => {
+      const session = sessions[String(popupId)];
+      const popup = await safeGetWindow(popupId, true);
+      const tab = popup?.tabs?.find((candidate) => candidate.id === tabId)
+        || popup?.tabs?.find((candidate) => candidate.active);
+      if (!session || !popup || !tab) return;
+      await returnToNormalWindow(tab, popup, session, sessions);
+    }).catch(console.error);
+    return false;
+  }
   if (message?.type === "activate-clean-window-tab") {
     const popupId = sender.tab?.windowId;
     const tabId = Number(message.tabId);

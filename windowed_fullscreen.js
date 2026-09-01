@@ -1,5 +1,7 @@
 const ROOT_ATTRIBUTE = "data-clean-window-fullscreen";
 const TARGET_ATTRIBUTE = "data-clean-window-fullscreen-target";
+const ACTIVE_ATTRIBUTE = "data-clean-window-active";
+const MODE_ATTRIBUTE = "data-clean-window-mode";
 const TAB_STRIP_ID = "clean-window-tab-strip";
 let fullscreenTarget = null;
 let savedScrollX = 0;
@@ -146,15 +148,36 @@ function installStyles() {
       width: calc(100% - 24px) !important;
       left: 12px !important;
     }
+
+    /* Clean Window에서는 영상 위에 떠서 시야를 가리는 YouTube 추천 카드,
+       채널 링크와 워터마크만 숨긴다. 재생 컨트롤은 그대로 유지한다. */
+    html[${ACTIVE_ATTRIBUTE}] .ytp-ce-element,
+    html[${ACTIVE_ATTRIBUTE}] .ytp-cards-teaser,
+    html[${ACTIVE_ATTRIBUTE}] .ytp-cards-button,
+    html[${ACTIVE_ATTRIBUTE}] .ytp-paid-content-overlay,
+    html[${ACTIVE_ATTRIBUTE}] .annotation,
+    html[${ACTIVE_ATTRIBUTE}] .branding-img-container,
+    html[${ACTIVE_ATTRIBUTE}] .ytp-title-channel,
+    html[${ACTIVE_ATTRIBUTE}] .ytp-title-link {
+      display: none !important;
+    }
   `;
   (document.head || document.documentElement).append(style);
 }
 
 function renderTabStrip(state) {
   document.getElementById(TAB_STRIP_ID)?.remove();
-  if (!state?.active || !Array.isArray(state.tabs) || state.tabs.length < 2) return;
+  if (!state?.active) {
+    document.documentElement.removeAttribute(ACTIVE_ATTRIBUTE);
+    document.documentElement.removeAttribute(MODE_ATTRIBUTE);
+    return;
+  }
 
+  document.documentElement.setAttribute(ACTIVE_ATTRIBUTE, "");
+  document.documentElement.setAttribute(MODE_ATTRIBUTE, state.mode || "clean");
   installStyles();
+  if (!Array.isArray(state.tabs) || state.tabs.length < 2) return;
+
   const strip = document.createElement("div");
   strip.id = TAB_STRIP_ID;
   strip.setAttribute("role", "tablist");
@@ -275,30 +298,23 @@ function isContainedFullscreenActive() {
   return document.documentElement.hasAttribute(ROOT_ATTRIBUTE);
 }
 
-function keepFullscreenInsideWindow() {
-  if (!isContainedFullscreenActive() || !document.fullscreenElement) return;
-  document.exitFullscreen().catch(() => {});
-}
-
-// 사이트가 버튼이나 자체 단축키로 실제 모니터 전체화를 요청하더라도
-// 3번 모드에서는 현재 Chrome 창의 내부 전체화면으로 유지한다.
-document.addEventListener("fullscreenchange", keepFullscreenInsideWindow, true);
-document.addEventListener("webkitfullscreenchange", keepFullscreenInsideWindow, true);
-
 // 일부 Chrome popup에서 commands 이벤트가 누락될 때 사용하는 보조 입력 경로.
 document.addEventListener("keydown", (event) => {
-  if (isContainedFullscreenActive()
-      && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
-      && event.key.toLowerCase() === "f") {
-    const target = event.target;
-    const isTyping = target instanceof HTMLInputElement
-      || target instanceof HTMLTextAreaElement
-      || target?.isContentEditable;
-    if (!isTyping) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
+  const target = event.target;
+  const isTyping = target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target?.isContentEditable;
+
+  // 실제 전체화면 중에는 첫 Esc를 Chrome에 맡겨 현재 Clean Window 모드로
+  // 돌아오게 한다. 그 밖의 2/3번 모드에서는 Esc로 일반 창까지 복귀한다.
+  if (event.key === "Escape"
+      && document.documentElement.hasAttribute(ACTIVE_ATTRIBUTE)
+      && !document.fullscreenElement
+      && !isTyping) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!event.repeat) chrome.runtime.sendMessage({ type: "return-clean-window-normal-request" });
+    return;
   }
 
   if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
