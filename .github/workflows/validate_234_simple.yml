@@ -26,9 +26,9 @@ jobs:
       - run: node --check windowed_fullscreen.js
       - run: node --check fullscreen_guard.js
       - run: node -e "const m=require('./manifest.json'); if(m.version!=='2.3.4') process.exit(1)"
-      - run: grep -q 'reason: "no-video"' windowed_fullscreen.js
-      - run: grep -q 'windowed-fullscreen-video-gone' background.js
-      - run: grep -q 'downgradeWindowedFullscreenToClean' background.js
+      - run: "grep -q 'reason: \"no-video\"' windowed_fullscreen.js"
+      - run: "grep -q 'windowed-fullscreen-video-gone' background.js"
+      - run: "grep -q 'downgradeWindowedFullscreenToClean' background.js"
       - name: Commit validated patch
         run: |
           git config user.name 'github-actions[bot]'
