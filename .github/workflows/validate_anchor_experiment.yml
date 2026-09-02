@@ -1,0 +1,55 @@
+name: Validate Clean Window anchor experiment
+
+on:
+  push:
+    branches:
+      - experiment/anchor-window-preservation
+    paths:
+      - 'tools/APPLY_ANCHOR_EXPERIMENT.py'
+      - '.github/workflows/validate_anchor_experiment.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply anchor patch
+        run: python tools/APPLY_ANCHOR_EXPERIMENT.py
+
+      - name: Validate JavaScript and experiment invariants
+        run: |
+          node --check background.js
+          node -e "const m=require('./manifest.json'); if(m.version!=='2.3.0') process.exit(1)"
+          python - <<'PY'
+          from pathlib import Path
+          t = Path('background.js').read_text(encoding='utf-8')
+          checks = {
+              'single-tab-only anchor': 'sourceTabs.length !== 1' in t,
+              'anchor stored in session': 'anchorTabId: anchorTab?.id ?? null' in t,
+              'anchor hidden from shell': '.filter((tab) => tab.id !== session.anchorTabId)' in t,
+              'anchor removed on return': 'await removeSourceAnchor(session.anchorTabId);' in t,
+              'source window reused': 'await movePopupTabBack(tab.id, source.id' in t,
+              'fallback new window retained': 'const normal = await chrome.windows.create({' in t,
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit('Missing invariants: ' + ', '.join(failed))
+          print('Anchor experiment invariants OK')
+          PY
+          git diff --check
+
+      - name: Commit validated experiment
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add background.js manifest.json ANCHOR_EXPERIMENT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Prototype source-window anchor preservation"
+          git push origin HEAD:experiment/anchor-window-preservation
