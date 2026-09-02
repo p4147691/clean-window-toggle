@@ -5,7 +5,18 @@ p = Path('windowed_fullscreen.js')
 s = p.read_text(encoding='utf-8')
 s = s.replace('const PAGE_FULLSCREEN_ATTRIBUTE = "data-clean-window-page-fullscreen";\n', '')
 s = s.replace('let fullscreenTargetKind = null;\n', '')
-pseudo = '''\n    html[${ROOT_ATTRIBUTE}]::after {\n      content: "" !important;\n      position: fixed !important;\n      inset: 0 !important;\n      box-sizing: border-box !important;\n      border: 2px solid #d9b84f !important;\n      box-shadow: inset 0 0 4px rgba(217, 184, 79, 0.32) !important;\n      pointer-events: none !important;\n      z-index: 2147483647 !important;\n    }\n'''
+pseudo = '''
+    html[${ROOT_ATTRIBUTE}]::after {
+      content: "" !important;
+      position: fixed !important;
+      inset: 0 !important;
+      box-sizing: border-box !important;
+      border: 2px solid #d9b84f !important;
+      box-shadow: inset 0 0 4px rgba(217, 184, 79, 0.32) !important;
+      pointer-events: none !important;
+      z-index: 2147483647 !important;
+    }
+'''
 s = s.replace(pseudo, '\n')
 s = s.replace('html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}])', 'html[${ROOT_ATTRIBUTE}]')
 
@@ -124,26 +135,90 @@ p.write_text(s, encoding='utf-8')
 
 b = Path('background.js')
 bg = b.read_text(encoding='utf-8')
-old = '''async function enterWindowedFullscreen(tab, popup, session, sessions) {\n  const content = await sendFullscreenMessage(tab.id, true);\n  const frame = await nativeWindowRequest("hideCleanWindowFrame");\n  session.mode = "windowed-fullscreen";\n  session.contentFullscreen = Boolean(content?.ok);\n  session.frameHidden = Boolean(frame?.ok);\n  sessions[String(popup.id)] = session;\n  await saveSessions(sessions);\n  await publishSessionState(popup.id, session);\n}\n'''
-new = '''async function enterWindowedFullscreen(tab, popup, session, sessions) {\n  const content = await sendFullscreenMessage(tab.id, true);\n  if (!content?.ok) return false;\n  session.mode = "windowed-fullscreen";\n  session.contentFullscreen = true;\n  session.frameHidden = false;\n  sessions[String(popup.id)] = session;\n  await saveSessions(sessions);\n  await publishSessionState(popup.id, session);\n  return true;\n}\n\nasync function downgradeWindowedFullscreenToClean(popupId, session, sessions) {\n  if (!session || session.mode !== "windowed-fullscreen") return;\n  await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});\n  session.mode = "clean";\n  session.contentFullscreen = false;\n  session.frameHidden = false;\n  sessions[String(popupId)] = session;\n  await saveSessions(sessions);\n  await publishSessionState(popupId, session).catch(() => {});\n}\n'''
+old = '''async function enterWindowedFullscreen(tab, popup, session, sessions) {
+  const content = await sendFullscreenMessage(tab.id, true);
+  const frame = await nativeWindowRequest("hideCleanWindowFrame");
+  session.mode = "windowed-fullscreen";
+  session.contentFullscreen = Boolean(content?.ok);
+  session.frameHidden = Boolean(frame?.ok);
+  sessions[String(popup.id)] = session;
+  await saveSessions(sessions);
+  await publishSessionState(popup.id, session);
+}
+'''
+new = '''async function enterWindowedFullscreen(tab, popup, session, sessions) {
+  const content = await sendFullscreenMessage(tab.id, true);
+  if (!content?.ok) return false;
+  session.mode = "windowed-fullscreen";
+  session.contentFullscreen = true;
+  session.frameHidden = false;
+  sessions[String(popup.id)] = session;
+  await saveSessions(sessions);
+  await publishSessionState(popup.id, session);
+  return true;
+}
+
+async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
+  if (!session || session.mode !== "windowed-fullscreen") return;
+  await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
+  session.mode = "clean";
+  session.contentFullscreen = false;
+  session.frameHidden = false;
+  sessions[String(popupId)] = session;
+  await saveSessions(sessions);
+  await publishSessionState(popupId, session).catch(() => {});
+}
+'''
 if old not in bg:
     raise SystemExit('enterWindowedFullscreen block not found')
 bg = bg.replace(old, new)
 
-old = '    else if (session.mode === "clean") await enterWindowedFullscreen(tab, window, session, sessions);\n    else await returnToNormalWindow(tab, window, session, sessions);'
-new = '    else if (session.mode === "clean") {\n      const entered = await enterWindowedFullscreen(tab, window, session, sessions);\n      if (!entered) await returnToNormalWindow(tab, window, session, sessions);\n    }\n    else await returnToNormalWindow(tab, window, session, sessions);'
+old = '''    else if (session.mode === "clean") await enterWindowedFullscreen(tab, window, session, sessions);
+    else await returnToNormalWindow(tab, window, session, sessions);'''
+new = '''    else if (session.mode === "clean") {
+      const entered = await enterWindowedFullscreen(tab, window, session, sessions);
+      if (!entered) await returnToNormalWindow(tab, window, session, sessions);
+    }
+    else await returnToNormalWindow(tab, window, session, sessions);'''
 if old not in bg:
     raise SystemExit('toggle clean block not found')
 bg = bg.replace(old, new)
 
-old = '''    if (session.mode === "windowed-fullscreen") {\n      await sendFullscreenMessage(targetTabId, true);\n      await nativeWindowRequest("hideCleanWindowFrame");\n    }\n    await publishSessionState(newPopup.id, session);'''
-new = '''    if (session.mode === "windowed-fullscreen") {\n      const content = await sendFullscreenMessage(targetTabId, true);\n      if (!content?.ok) {\n        session.mode = "clean";\n        session.contentFullscreen = false;\n        session.frameHidden = false;\n        await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});\n        sessions[String(newPopup.id)] = session;\n        await saveSessions(sessions);\n      }\n    }\n    await publishSessionState(newPopup.id, session);'''
+old = '''    if (session.mode === "windowed-fullscreen") {
+      await sendFullscreenMessage(targetTabId, true);
+      await nativeWindowRequest("hideCleanWindowFrame");
+    }
+    await publishSessionState(newPopup.id, session);'''
+new = '''    if (session.mode === "windowed-fullscreen") {
+      const content = await sendFullscreenMessage(targetTabId, true);
+      if (!content?.ok) {
+        session.mode = "clean";
+        session.contentFullscreen = false;
+        session.frameHidden = false;
+        await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
+        sessions[String(newPopup.id)] = session;
+        await saveSessions(sessions);
+      }
+    }
+    await publishSessionState(newPopup.id, session);'''
 if old not in bg:
     raise SystemExit('switch fullscreen block not found')
 bg = bg.replace(old, new)
 
 needle = '''  if (message?.type === "return-clean-window-normal-request") {'''
-insert = '''  if (message?.type === "windowed-fullscreen-video-gone") {\n    const popupId = sender.tab?.windowId;\n    if (Number.isInteger(popupId)) {\n      getSessions().then(async (sessions) => {\n        const session = sessions[String(popupId)];\n        if (session?.mode === "windowed-fullscreen") {\n          await downgradeWindowedFullscreenToClean(popupId, session, sessions);\n        }\n      }).catch(console.error);\n    }\n    return false;\n  }\n'''
+insert = '''  if (message?.type === "windowed-fullscreen-video-gone") {
+    const popupId = sender.tab?.windowId;
+    if (Number.isInteger(popupId)) {
+      getSessions().then(async (sessions) => {
+        const session = sessions[String(popupId)];
+        if (session?.mode === "windowed-fullscreen") {
+          await downgradeWindowedFullscreenToClean(popupId, session, sessions);
+        }
+      }).catch(console.error);
+    }
+    return false;
+  }
+'''
 if needle not in bg:
     raise SystemExit('runtime message insertion point not found')
 bg = bg.replace(needle, insert + needle)
