@@ -1,0 +1,38 @@
+name: Validate 2.3.4 video-only stage 3
+
+on:
+  push:
+    branches:
+      - fix/video-only-windowed-fullscreen-234
+    paths:
+      - '.github/workflows/validate_234_simple.yml'
+      - '.github/trigger-234b.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/video-only-windowed-fullscreen-234
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python tools/APPLY_234.py
+      - run: node --check background.js
+      - run: node --check windowed_fullscreen.js
+      - run: node --check fullscreen_guard.js
+      - run: node -e "const m=require('./manifest.json'); if(m.version!=='2.3.4') process.exit(1)"
+      - run: grep -q 'reason: "no-video"' windowed_fullscreen.js
+      - run: grep -q 'windowed-fullscreen-video-gone' background.js
+      - run: grep -q 'downgradeWindowedFullscreenToClean' background.js
+      - name: Commit validated patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add background.js windowed_fullscreen.js manifest.json
+          git commit -m 'Make stage 3 video-only and simplify cleanup'
+          git push origin HEAD:fix/video-only-windowed-fullscreen-234
