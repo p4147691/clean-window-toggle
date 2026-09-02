@@ -2,12 +2,16 @@ const ROOT_ATTRIBUTE = "data-clean-window-fullscreen";
 const TARGET_ATTRIBUTE = "data-clean-window-fullscreen-target";
 const ACTIVE_ATTRIBUTE = "data-clean-window-active";
 const MODE_ATTRIBUTE = "data-clean-window-mode";
+const PAGE_FULLSCREEN_ATTRIBUTE = "data-clean-window-page-fullscreen";
 const TAB_STRIP_ID = "clean-window-tab-strip";
 const BORDER_ID = "clean-window-gold-border";
 let fullscreenTarget = null;
 let savedScrollX = 0;
 let savedScrollY = 0;
 let lastToggleRequestAt = 0;
+let fullscreenTargetKind = null;
+let fullscreenObserver = null;
+let fullscreenRepairTimer = null;
 const pausedMedia = new Set();
 
 function installStyles() {
@@ -15,13 +19,13 @@ function installStyles() {
   const style = document.createElement("style");
   style.id = "clean-window-fullscreen-style";
   style.textContent = `
-    html[${ROOT_ATTRIBUTE}],
-    html[${ROOT_ATTRIBUTE}] body {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]),
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) body {
       overflow: hidden !important;
       background: #000 !important;
     }
 
-    html[${ROOT_ATTRIBUTE}] body * {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) body * {
       visibility: hidden !important;
     }
 
@@ -36,8 +40,8 @@ function installStyles() {
       z-index: 2147483647 !important;
     }
 
-    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}],
-    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}] * {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}],
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] * {
       visibility: visible !important;
     }
 
@@ -118,7 +122,7 @@ function installStyles() {
       color: #f4dfa0 !important;
     }
 
-    [${TARGET_ATTRIBUTE}] {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] {
       position: fixed !important;
       inset: 0 !important;
       width: 100vw !important;
@@ -136,7 +140,7 @@ function installStyles() {
       background: #000 !important;
     }
 
-    [${TARGET_ATTRIBUTE}] video {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] video {
       position: absolute !important;
       inset: 0 !important;
       width: 100% !important;
@@ -149,14 +153,14 @@ function installStyles() {
       background: #000 !important;
     }
 
-    [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {
       position: absolute !important;
       inset: 0 !important;
       width: 100% !important;
       height: 100% !important;
     }
 
-    [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {
+    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {
       width: calc(100% - 24px) !important;
       left: 12px !important;
     }
@@ -189,7 +193,7 @@ function renderGoldBorder(active) {
 function renderTabStrip(state) {
   document.getElementById(TAB_STRIP_ID)?.remove();
   if (!state?.active) {
-    renderGoldBorder(false);
+    clearWindowedFullscreenVisuals(false);
     document.documentElement.removeAttribute(ACTIVE_ATTRIBUTE);
     document.documentElement.removeAttribute(MODE_ATTRIBUTE);
     return;
@@ -198,7 +202,7 @@ function renderTabStrip(state) {
   document.documentElement.setAttribute(ACTIVE_ATTRIBUTE, "");
   document.documentElement.setAttribute(MODE_ATTRIBUTE, state.mode || "clean");
   installStyles();
-  renderGoldBorder(state.mode === "windowed-fullscreen");
+  renderGoldBorder(state.mode === "windowed-fullscreen" && document.documentElement.hasAttribute(ROOT_ATTRIBUTE));
   if (!Array.isArray(state.tabs) || state.tabs.length < 2) return;
 
   const strip = document.createElement("div");
@@ -240,47 +244,103 @@ function visibleArea(element) {
 
 function findFullscreenTarget() {
   const youtubePlayer = document.querySelector("#movie_player.html5-video-player, #movie_player");
-  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return youtubePlayer;
+  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return { target: youtubePlayer, kind: "video" };
 
   const videos = [...document.querySelectorAll("video")]
     .map((video) => ({ video, area: visibleArea(video) }))
     .filter((item) => item.area > 0)
     .sort((a, b) => b.area - a.area);
-  if (videos.length > 0) return videos[0].video;
+  if (videos.length > 0) return { target: videos[0].video, kind: "video" };
 
-  // 영상이 없는 페이지도 popup 전체를 채울 수 있도록 페이지 자체를 사용한다.
-  return document.body || document.documentElement;
+  return { target: document.body || document.documentElement, kind: "page" };
 }
 
-function setWindowedFullscreen(enabled) {
-  if (!enabled) {
-    renderGoldBorder(false);
-    document.documentElement.removeAttribute(ROOT_ATTRIBUTE);
-    fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
-    fullscreenTarget = null;
-    window.scrollTo(savedScrollX, savedScrollY);
-    window.dispatchEvent(new Event("resize"));
-    setTimeout(() => window.dispatchEvent(new Event("resize")), 80);
-    return { ok: true };
-  }
-
-  const target = findFullscreenTarget();
-  if (!target) return { ok: false, error: "표시할 페이지를 찾지 못했습니다." };
-
-  installStyles();
-  savedScrollX = window.scrollX;
-  savedScrollY = window.scrollY;
-  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
-  fullscreenTarget = target;
-  document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");
-  fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");
-  renderGoldBorder(true);
-  window.scrollTo(0, 0);
+function dispatchFullscreenResize() {
   window.dispatchEvent(new Event("resize"));
   requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   setTimeout(() => window.dispatchEvent(new Event("resize")), 80);
-  return { ok: true };
 }
+
+function applyFullscreenTarget(result, preserveScroll = false) {
+  if (!result?.target) return false;
+  const { target, kind } = result;
+  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
+  fullscreenTarget = target;
+  fullscreenTargetKind = kind;
+  document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");
+  if (kind === "page") {
+    document.documentElement.setAttribute(PAGE_FULLSCREEN_ATTRIBUTE, "");
+  } else {
+    document.documentElement.removeAttribute(PAGE_FULLSCREEN_ATTRIBUTE);
+    fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");
+    if (!preserveScroll) window.scrollTo(0, 0);
+  }
+  renderGoldBorder(true);
+  dispatchFullscreenResize();
+  return true;
+}
+
+function refreshWindowedFullscreenTarget() {
+  if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) return;
+  const result = findFullscreenTarget();
+  const sameTarget = fullscreenTarget === result.target;
+  const sameKind = fullscreenTargetKind === result.kind;
+  const targetStillConnected = fullscreenTarget?.isConnected !== false;
+  if (sameTarget && sameKind && targetStillConnected) return;
+  applyFullscreenTarget(result, true);
+}
+
+function scheduleFullscreenRepair(delay = 80) {
+  if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) return;
+  if (fullscreenRepairTimer) clearTimeout(fullscreenRepairTimer);
+  fullscreenRepairTimer = setTimeout(() => { fullscreenRepairTimer = null; refreshWindowedFullscreenTarget(); }, delay);
+}
+
+function startFullscreenRepairWatch() {
+  if (fullscreenObserver) return;
+  fullscreenObserver = new MutationObserver(() => scheduleFullscreenRepair(90));
+  fullscreenObserver.observe(document.documentElement, { childList: true, subtree: true });
+}
+
+function stopFullscreenRepairWatch() {
+  fullscreenObserver?.disconnect();
+  fullscreenObserver = null;
+  if (fullscreenRepairTimer) clearTimeout(fullscreenRepairTimer);
+  fullscreenRepairTimer = null;
+}
+
+function clearWindowedFullscreenVisuals(restoreScroll = true) {
+  stopFullscreenRepairWatch();
+  renderGoldBorder(false);
+  document.documentElement.removeAttribute(ROOT_ATTRIBUTE);
+  document.documentElement.removeAttribute(PAGE_FULLSCREEN_ATTRIBUTE);
+  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
+  fullscreenTarget = null;
+  fullscreenTargetKind = null;
+  if (restoreScroll) window.scrollTo(savedScrollX, savedScrollY);
+  dispatchFullscreenResize();
+}
+
+function setWindowedFullscreen(enabled) {
+  if (!enabled) { clearWindowedFullscreenVisuals(true); return { ok: true }; }
+  installStyles();
+  if (document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) {
+    refreshWindowedFullscreenTarget();
+    startFullscreenRepairWatch();
+    return { ok: true, kind: fullscreenTargetKind };
+  }
+  savedScrollX = window.scrollX;
+  savedScrollY = window.scrollY;
+  const result = findFullscreenTarget();
+  if (!applyFullscreenTarget(result, false)) return { ok: false, error: "표시할 페이지를 찾지 못했습니다." };
+  startFullscreenRepairWatch();
+  return { ok: true, kind: fullscreenTargetKind };
+}
+
+document.addEventListener("yt-navigate-finish", () => scheduleFullscreenRepair(40), true);
+window.addEventListener("popstate", () => scheduleFullscreenRepair(40), true);
+window.addEventListener("hashchange", () => scheduleFullscreenRepair(40), true);
+window.addEventListener("pageshow", () => scheduleFullscreenRepair(40), true);
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "set-windowed-fullscreen") {

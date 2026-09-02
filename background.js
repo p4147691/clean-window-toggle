@@ -408,6 +408,8 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
     const source = await safeGetWindow(session.sourceWindowId);
     if (source) {
       await movePopupTabBack(tab.id, source.id, session.tabMeta[String(tab.id)]);
+      await sendFullscreenMessage(tab.id, false).catch(() => {});
+      await sendTabMessage(tab.id, { type: "set-clean-window-shell", active: false }).catch(() => {});
       await chrome.tabs.update(tab.id, { active: true });
       await removeSourceAnchorAfterReturn(session.anchorTabId, source.id, tab.id);
       delete sessions[String(popup.id)];
@@ -736,11 +738,11 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
       if (changeInfo.title || changeInfo.url || changeInfo.status === "complete") {
         await publishSessionState(Number(popupKey), session).catch(() => {});
       }
-      if (changeInfo.status === "complete"
+      if ((changeInfo.url || changeInfo.status === "complete")
           && tab.windowId === Number(popupKey)
           && tab.active
           && session.mode === "windowed-fullscreen") {
-        await sendFullscreenMessage(tab.id, true).catch(() => {});
+        setTimeout(() => sendFullscreenMessage(tab.id, true).catch(() => {}), 120);
       }
     }
   }
