@@ -1,0 +1,120 @@
+name: Fix and validate Clean Window 2.3.3 windowed fullscreen
+
+on:
+  push:
+    branches:
+      - fix/windowed-fullscreen-navigation-233
+    paths:
+      - '.github/workflows/fix_windowed_fullscreen_233.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/windowed-fullscreen-navigation-233
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Patch 2.3.3
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+
+          p = Path('windowed_fullscreen.js')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace(
+            'const MODE_ATTRIBUTE = "data-clean-window-mode";\n',
+            'const MODE_ATTRIBUTE = "data-clean-window-mode";\nconst PAGE_FULLSCREEN_ATTRIBUTE = "data-clean-window-page-fullscreen";\n'
+          )
+          s = s.replace(
+            'let lastToggleRequestAt = 0;\nconst pausedMedia = new Set();',
+            'let lastToggleRequestAt = 0;\nlet fullscreenTargetKind = null;\nlet fullscreenObserver = null;\nlet fullscreenRepairTimer = null;\nconst pausedMedia = new Set();'
+          )
+
+          s = s.replace(
+            '''    html[${ROOT_ATTRIBUTE}],\n    html[${ROOT_ATTRIBUTE}] body {\n      overflow: hidden !important;\n      background: #000 !important;\n    }\n\n    html[${ROOT_ATTRIBUTE}] body * {\n      visibility: hidden !important;\n    }''',
+            '''    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]),\n    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) body {\n      overflow: hidden !important;\n      background: #000 !important;\n    }\n\n    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) body * {\n      visibility: hidden !important;\n    }'''
+          )
+          s = s.replace(
+            '''    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}],\n    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}] * {\n      visibility: visible !important;\n    }''',
+            '''    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}],\n    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] * {\n      visibility: visible !important;\n    }'''
+          )
+          s = s.replace(
+            '''    [${TARGET_ATTRIBUTE}] {\n      position: fixed !important;''',
+            '''    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] {\n      position: fixed !important;'''
+          )
+          s = s.replace(
+            '''    [${TARGET_ATTRIBUTE}] video {''',
+            '''    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] video {'''
+          )
+          s = s.replace(
+            '''    [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {''',
+            '''    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {'''
+          )
+          s = s.replace(
+            '''    [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {''',
+            '''    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {'''
+          )
+
+          s = s.replace(
+            '  renderGoldBorder(state.mode === "windowed-fullscreen");',
+            '  renderGoldBorder(state.mode === "windowed-fullscreen" && document.documentElement.hasAttribute(ROOT_ATTRIBUTE));'
+          )
+
+          old = '''function findFullscreenTarget() {\n  const youtubePlayer = document.querySelector("#movie_player.html5-video-player, #movie_player");\n  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return youtubePlayer;\n\n  const videos = [...document.querySelectorAll("video")]\n    .map((video) => ({ video, area: visibleArea(video) }))\n    .filter((item) => item.area > 0)\n    .sort((a, b) => b.area - a.area);\n  if (videos.length > 0) return videos[0].video;\n\n  // 영상이 없는 페이지도 popup 전체를 채울 수 있도록 페이지 자체를 사용한다.\n  return document.body || document.documentElement;\n}\n\nfunction setWindowedFullscreen(enabled) {\n  if (!enabled) {\n    renderGoldBorder(false);\n    document.documentElement.removeAttribute(ROOT_ATTRIBUTE);\n    fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);\n    fullscreenTarget = null;\n    window.scrollTo(savedScrollX, savedScrollY);\n    window.dispatchEvent(new Event("resize"));\n    setTimeout(() => window.dispatchEvent(new Event("resize")), 80);\n    return { ok: true };\n  }\n\n  const target = findFullscreenTarget();\n  if (!target) return { ok: false, error: "표시할 페이지를 찾지 못했습니다." };\n\n  installStyles();\n  savedScrollX = window.scrollX;\n  savedScrollY = window.scrollY;\n  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);\n  fullscreenTarget = target;\n  document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");\n  fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");\n  renderGoldBorder(true);\n  window.scrollTo(0, 0);\n  window.dispatchEvent(new Event("resize"));\n  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));\n  setTimeout(() => window.dispatchEvent(new Event("resize")), 80);\n  return { ok: true };\n}\n'''
+
+          new = '''function findFullscreenTarget() {\n  const youtubePlayer = document.querySelector("#movie_player.html5-video-player, #movie_player");\n  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return { target: youtubePlayer, kind: "video" };\n\n  const videos = [...document.querySelectorAll("video")]\n    .map((video) => ({ video, area: visibleArea(video) }))\n    .filter((item) => item.area > 0)\n    .sort((a, b) => b.area - a.area);\n  if (videos.length > 0) return { target: videos[0].video, kind: "video" };\n\n  // 영상이 없는 일반 페이지에서는 페이지 자체를 그대로 보여준다.\n  // 창 프레임만 제거하고 문서 레이아웃/스크롤은 건드리지 않는다.\n  return { target: document.body || document.documentElement, kind: "page" };\n}\n\nfunction dispatchFullscreenResize() {\n  window.dispatchEvent(new Event("resize"));\n  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));\n  setTimeout(() => window.dispatchEvent(new Event("resize")), 80);\n}\n\nfunction applyFullscreenTarget(result, preserveScroll = false) {\n  if (!result?.target) return false;\n  const { target, kind } = result;\n\n  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);\n  fullscreenTarget = target;\n  fullscreenTargetKind = kind;\n  document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");\n\n  if (kind === "page") {\n    document.documentElement.setAttribute(PAGE_FULLSCREEN_ATTRIBUTE, "");\n  } else {\n    document.documentElement.removeAttribute(PAGE_FULLSCREEN_ATTRIBUTE);\n    fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");\n    if (!preserveScroll) window.scrollTo(0, 0);\n  }\n\n  renderGoldBorder(true);\n  dispatchFullscreenResize();\n  return true;\n}\n\nfunction refreshWindowedFullscreenTarget() {\n  if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) return;\n  const result = findFullscreenTarget();\n  const sameTarget = fullscreenTarget === result.target;\n  const sameKind = fullscreenTargetKind === result.kind;\n  const targetStillConnected = fullscreenTarget?.isConnected !== false;\n  if (sameTarget && sameKind && targetStillConnected) return;\n  applyFullscreenTarget(result, true);\n}\n\nfunction scheduleFullscreenRepair(delay = 80) {\n  if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) return;\n  if (fullscreenRepairTimer) clearTimeout(fullscreenRepairTimer);\n  fullscreenRepairTimer = setTimeout(() => {\n    fullscreenRepairTimer = null;\n    refreshWindowedFullscreenTarget();\n  }, delay);\n}\n\nfunction startFullscreenRepairWatch() {\n  if (fullscreenObserver) return;\n  fullscreenObserver = new MutationObserver(() => scheduleFullscreenRepair(90));\n  fullscreenObserver.observe(document.documentElement, { childList: true, subtree: true });\n}\n\nfunction stopFullscreenRepairWatch() {\n  fullscreenObserver?.disconnect();\n  fullscreenObserver = null;\n  if (fullscreenRepairTimer) clearTimeout(fullscreenRepairTimer);\n  fullscreenRepairTimer = null;\n}\n\nfunction clearWindowedFullscreenVisuals(restoreScroll = true) {\n  stopFullscreenRepairWatch();\n  renderGoldBorder(false);\n  document.documentElement.removeAttribute(ROOT_ATTRIBUTE);\n  document.documentElement.removeAttribute(PAGE_FULLSCREEN_ATTRIBUTE);\n  fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);\n  fullscreenTarget = null;\n  fullscreenTargetKind = null;\n  if (restoreScroll) window.scrollTo(savedScrollX, savedScrollY);\n  dispatchFullscreenResize();\n}\n\nfunction setWindowedFullscreen(enabled) {\n  if (!enabled) {\n    clearWindowedFullscreenVisuals(true);\n    return { ok: true };\n  }\n\n  installStyles();\n  if (document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) {\n    refreshWindowedFullscreenTarget();\n    startFullscreenRepairWatch();\n    return { ok: true, kind: fullscreenTargetKind };\n  }\n\n  savedScrollX = window.scrollX;\n  savedScrollY = window.scrollY;\n  const result = findFullscreenTarget();\n  if (!applyFullscreenTarget(result, false)) {\n    return { ok: false, error: "표시할 페이지를 찾지 못했습니다." };\n  }\n  startFullscreenRepairWatch();\n  return { ok: true, kind: fullscreenTargetKind };\n}\n\ndocument.addEventListener("yt-navigate-finish", () => scheduleFullscreenRepair(40), true);\nwindow.addEventListener("popstate", () => scheduleFullscreenRepair(40), true);\nwindow.addEventListener("hashchange", () => scheduleFullscreenRepair(40), true);\nwindow.addEventListener("pageshow", () => scheduleFullscreenRepair(40), true);\n'''
+
+          if old not in s:
+            raise SystemExit('windowed fullscreen target block not found')
+          s = s.replace(old, new)
+
+          s = s.replace(
+            '''  if (!state?.active) {\n    renderGoldBorder(false);\n    document.documentElement.removeAttribute(ACTIVE_ATTRIBUTE);\n    document.documentElement.removeAttribute(MODE_ATTRIBUTE);\n    return;\n  }''',
+            '''  if (!state?.active) {\n    clearWindowedFullscreenVisuals(false);\n    document.documentElement.removeAttribute(ACTIVE_ATTRIBUTE);\n    document.documentElement.removeAttribute(MODE_ATTRIBUTE);\n    return;\n  }'''
+          )
+          p.write_text(s, encoding='utf-8')
+
+          b = Path('background.js')
+          bg = b.read_text(encoding='utf-8')
+          old_return = '''      await movePopupTabBack(tab.id, source.id, session.tabMeta[String(tab.id)]);\n      await chrome.tabs.update(tab.id, { active: true });\n      await removeSourceAnchorAfterReturn(session.anchorTabId, source.id, tab.id);'''
+          new_return = '''      await movePopupTabBack(tab.id, source.id, session.tabMeta[String(tab.id)]);\n      // Navigation races can make the first cleanup message miss the page.\n      // Once the real tab is back in the source window, clear fullscreen/shell once more.\n      await sendFullscreenMessage(tab.id, false).catch(() => {});\n      await sendTabMessage(tab.id, { type: "set-clean-window-shell", active: false }).catch(() => {});\n      await chrome.tabs.update(tab.id, { active: true });\n      await removeSourceAnchorAfterReturn(session.anchorTabId, source.id, tab.id);'''
+          if old_return not in bg:
+            raise SystemExit('return cleanup block not found')
+          bg = bg.replace(old_return, new_return)
+
+          old_update = '''      if (changeInfo.status === "complete"\n          && tab.windowId === Number(popupKey)\n          && tab.active\n          && session.mode === "windowed-fullscreen") {\n        await sendFullscreenMessage(tab.id, true).catch(() => {});\n      }'''
+          new_update = '''      if ((changeInfo.url || changeInfo.status === "complete")\n          && tab.windowId === Number(popupKey)\n          && tab.active\n          && session.mode === "windowed-fullscreen") {\n        // YouTube and other SPA pages may replace the player without a full reload.\n        // Re-assert stage 3 on URL changes as well as normal completion.\n        setTimeout(() => sendFullscreenMessage(tab.id, true).catch(() => {}), 120);\n      }'''
+          if old_update not in bg:
+            raise SystemExit('tabs.onUpdated fullscreen block not found')
+          bg = bg.replace(old_update, new_update)
+          b.write_text(bg, encoding='utf-8')
+
+          m = Path('manifest.json')
+          data = json.loads(m.read_text(encoding='utf-8'))
+          data['version'] = '2.3.3'
+          m.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+      - name: Validate JavaScript and invariants
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          node --check fullscreen_guard.js
+          node -e "const m=require('./manifest.json'); if(m.version!=='2.3.3') process.exit(1)"
+          grep -q 'PAGE_FULLSCREEN_ATTRIBUTE' windowed_fullscreen.js
+          grep -q 'yt-navigate-finish' windowed_fullscreen.js
+          grep -q 'MutationObserver' windowed_fullscreen.js
+          grep -q 'changeInfo.url || changeInfo.status === "complete"' background.js
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add background.js windowed_fullscreen.js manifest.json
+          git commit -m 'Fix stage 3 navigation and page scrolling'
+          git push origin HEAD:fix/windowed-fullscreen-navigation-233
