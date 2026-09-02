@@ -387,13 +387,25 @@ async function enterCleanWindow(tab, source, sessions) {
 
 async function enterWindowedFullscreen(tab, popup, session, sessions) {
   const content = await sendFullscreenMessage(tab.id, true);
-  const frame = await nativeWindowRequest("hideCleanWindowFrame");
+  if (!content?.ok) return false;
   session.mode = "windowed-fullscreen";
-  session.contentFullscreen = Boolean(content?.ok);
-  session.frameHidden = Boolean(frame?.ok);
+  session.contentFullscreen = true;
+  session.frameHidden = false;
   sessions[String(popup.id)] = session;
   await saveSessions(sessions);
   await publishSessionState(popup.id, session);
+  return true;
+}
+
+async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
+  if (!session || session.mode !== "windowed-fullscreen") return;
+  await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
+  session.mode = "clean";
+  session.contentFullscreen = false;
+  session.frameHidden = false;
+  sessions[String(popupId)] = session;
+  await saveSessions(sessions);
+  await publishSessionState(popupId, session).catch(() => {});
 }
 
 async function returnToNormalWindow(tab, popup, session, sessions) {
@@ -487,8 +499,15 @@ async function switchCleanWindowTab(popupId, targetTabId, sessions) {
     sessions[String(newPopup.id)] = session;
     await saveSessions(sessions);
     if (session.mode === "windowed-fullscreen") {
-      await sendFullscreenMessage(targetTabId, true);
-      await nativeWindowRequest("hideCleanWindowFrame");
+      const content = await sendFullscreenMessage(targetTabId, true);
+      if (!content?.ok) {
+        session.mode = "clean";
+        session.contentFullscreen = false;
+        session.frameHidden = false;
+        await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
+        sessions[String(newPopup.id)] = session;
+        await saveSessions(sessions);
+      }
     }
     await publishSessionState(newPopup.id, session);
   } catch (error) {
@@ -643,7 +662,10 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId) {
       }
       await enterCleanWindow(tab, window, sessions);
     }
-    else if (session.mode === "clean") await enterWindowedFullscreen(tab, window, session, sessions);
+    else if (session.mode === "clean") {
+      const entered = await enterWindowedFullscreen(tab, window, session, sessions);
+      if (!entered) await returnToNormalWindow(tab, window, session, sessions);
+    }
     else await returnToNormalWindow(tab, window, session, sessions);
   } finally {
     transitionInProgress = false;
@@ -665,6 +687,18 @@ chrome.commands.onCommand.addListener((command, tab) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "toggle-clean-window-request") {
     toggleCleanWindow(sender.tab?.windowId, sender.tab?.id).catch(console.error);
+    return false;
+  }
+  if (message?.type === "windowed-fullscreen-video-gone") {
+    const popupId = sender.tab?.windowId;
+    if (Number.isInteger(popupId)) {
+      getSessions().then(async (sessions) => {
+        const session = sessions[String(popupId)];
+        if (session?.mode === "windowed-fullscreen") {
+          await downgradeWindowedFullscreenToClean(popupId, session, sessions);
+        }
+      }).catch(console.error);
+    }
     return false;
   }
   if (message?.type === "return-clean-window-normal-request") {

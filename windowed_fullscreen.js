@@ -2,14 +2,12 @@ const ROOT_ATTRIBUTE = "data-clean-window-fullscreen";
 const TARGET_ATTRIBUTE = "data-clean-window-fullscreen-target";
 const ACTIVE_ATTRIBUTE = "data-clean-window-active";
 const MODE_ATTRIBUTE = "data-clean-window-mode";
-const PAGE_FULLSCREEN_ATTRIBUTE = "data-clean-window-page-fullscreen";
 const TAB_STRIP_ID = "clean-window-tab-strip";
 const BORDER_ID = "clean-window-gold-border";
 let fullscreenTarget = null;
 let savedScrollX = 0;
 let savedScrollY = 0;
 let lastToggleRequestAt = 0;
-let fullscreenTargetKind = null;
 let fullscreenObserver = null;
 let fullscreenRepairTimer = null;
 const pausedMedia = new Set();
@@ -19,29 +17,19 @@ function installStyles() {
   const style = document.createElement("style");
   style.id = "clean-window-fullscreen-style";
   style.textContent = `
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]),
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) body {
+    html[${ROOT_ATTRIBUTE}],
+    html[${ROOT_ATTRIBUTE}] body {
       overflow: hidden !important;
       background: #000 !important;
     }
 
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) body * {
+    html[${ROOT_ATTRIBUTE}] body * {
       visibility: hidden !important;
     }
 
-    html[${ROOT_ATTRIBUTE}]::after {
-      content: "" !important;
-      position: fixed !important;
-      inset: 0 !important;
-      box-sizing: border-box !important;
-      border: 2px solid #d9b84f !important;
-      box-shadow: inset 0 0 4px rgba(217, 184, 79, 0.32) !important;
-      pointer-events: none !important;
-      z-index: 2147483647 !important;
-    }
 
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}],
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] * {
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}],
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}] * {
       visibility: visible !important;
     }
 
@@ -122,7 +110,7 @@ function installStyles() {
       color: #f4dfa0 !important;
     }
 
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] {
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}] {
       position: fixed !important;
       inset: 0 !important;
       width: 100vw !important;
@@ -140,7 +128,7 @@ function installStyles() {
       background: #000 !important;
     }
 
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}] video {
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}] video {
       position: absolute !important;
       inset: 0 !important;
       width: 100% !important;
@@ -153,14 +141,14 @@ function installStyles() {
       background: #000 !important;
     }
 
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}].html5-video-player .html5-video-container {
       position: absolute !important;
       inset: 0 !important;
       width: 100% !important;
       height: 100% !important;
     }
 
-    html[${ROOT_ATTRIBUTE}]:not([${PAGE_FULLSCREEN_ATTRIBUTE}]) [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {
+    html[${ROOT_ATTRIBUTE}] [${TARGET_ATTRIBUTE}].html5-video-player .ytp-chrome-bottom {
       width: calc(100% - 24px) !important;
       left: 12px !important;
     }
@@ -244,15 +232,13 @@ function visibleArea(element) {
 
 function findFullscreenTarget() {
   const youtubePlayer = document.querySelector("#movie_player.html5-video-player, #movie_player");
-  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return { target: youtubePlayer, kind: "video" };
+  if (youtubePlayer && visibleArea(youtubePlayer) > 0) return youtubePlayer;
 
   const videos = [...document.querySelectorAll("video")]
     .map((video) => ({ video, area: visibleArea(video) }))
     .filter((item) => item.area > 0)
     .sort((a, b) => b.area - a.area);
-  if (videos.length > 0) return { target: videos[0].video, kind: "video" };
-
-  return { target: document.body || document.documentElement, kind: "page" };
+  return videos[0]?.video || null;
 }
 
 function dispatchFullscreenResize() {
@@ -261,39 +247,43 @@ function dispatchFullscreenResize() {
   setTimeout(() => window.dispatchEvent(new Event("resize")), 80);
 }
 
-function applyFullscreenTarget(result, preserveScroll = false) {
-  if (!result?.target) return false;
-  const { target, kind } = result;
+function applyFullscreenTarget(target, preserveScroll = false) {
+  if (!target) return false;
   fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
   fullscreenTarget = target;
-  fullscreenTargetKind = kind;
   document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");
-  if (kind === "page") {
-    document.documentElement.setAttribute(PAGE_FULLSCREEN_ATTRIBUTE, "");
-  } else {
-    document.documentElement.removeAttribute(PAGE_FULLSCREEN_ATTRIBUTE);
-    fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");
-    if (!preserveScroll) window.scrollTo(0, 0);
-  }
+  fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");
   renderGoldBorder(true);
+  if (!preserveScroll) window.scrollTo(0, 0);
   dispatchFullscreenResize();
   return true;
 }
 
+function notifyVideoGone() {
+  chrome.runtime.sendMessage({ type: "windowed-fullscreen-video-gone" }, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
 function refreshWindowedFullscreenTarget() {
   if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) return;
-  const result = findFullscreenTarget();
-  const sameTarget = fullscreenTarget === result.target;
-  const sameKind = fullscreenTargetKind === result.kind;
-  const targetStillConnected = fullscreenTarget?.isConnected !== false;
-  if (sameTarget && sameKind && targetStillConnected) return;
-  applyFullscreenTarget(result, true);
+  const target = findFullscreenTarget();
+  if (!target) {
+    clearWindowedFullscreenVisuals(true);
+    notifyVideoGone();
+    return;
+  }
+  if (fullscreenTarget === target && fullscreenTarget?.isConnected !== false) return;
+  applyFullscreenTarget(target, true);
 }
 
 function scheduleFullscreenRepair(delay = 80) {
   if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) return;
   if (fullscreenRepairTimer) clearTimeout(fullscreenRepairTimer);
-  fullscreenRepairTimer = setTimeout(() => { fullscreenRepairTimer = null; refreshWindowedFullscreenTarget(); }, delay);
+  fullscreenRepairTimer = setTimeout(() => {
+    fullscreenRepairTimer = null;
+    refreshWindowedFullscreenTarget();
+  }, delay);
 }
 
 function startFullscreenRepairWatch() {
@@ -313,28 +303,34 @@ function clearWindowedFullscreenVisuals(restoreScroll = true) {
   stopFullscreenRepairWatch();
   renderGoldBorder(false);
   document.documentElement.removeAttribute(ROOT_ATTRIBUTE);
-  document.documentElement.removeAttribute(PAGE_FULLSCREEN_ATTRIBUTE);
+  document.documentElement.removeAttribute("data-clean-window-page-fullscreen");
   fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
+  for (const element of document.querySelectorAll(`[${TARGET_ATTRIBUTE}]`)) {
+    element.removeAttribute(TARGET_ATTRIBUTE);
+  }
   fullscreenTarget = null;
-  fullscreenTargetKind = null;
   if (restoreScroll) window.scrollTo(savedScrollX, savedScrollY);
   dispatchFullscreenResize();
 }
 
 function setWindowedFullscreen(enabled) {
-  if (!enabled) { clearWindowedFullscreenVisuals(true); return { ok: true }; }
-  installStyles();
-  if (document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) {
-    refreshWindowedFullscreenTarget();
-    startFullscreenRepairWatch();
-    return { ok: true, kind: fullscreenTargetKind };
+  if (!enabled) {
+    clearWindowedFullscreenVisuals(true);
+    return { ok: true };
   }
-  savedScrollX = window.scrollX;
-  savedScrollY = window.scrollY;
-  const result = findFullscreenTarget();
-  if (!applyFullscreenTarget(result, false)) return { ok: false, error: "표시할 페이지를 찾지 못했습니다." };
+  const target = findFullscreenTarget();
+  if (!target) {
+    clearWindowedFullscreenVisuals(false);
+    return { ok: false, reason: "no-video", error: "이 페이지에는 확대할 영상이 없습니다." };
+  }
+  installStyles();
+  if (!document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) {
+    savedScrollX = window.scrollX;
+    savedScrollY = window.scrollY;
+  }
+  applyFullscreenTarget(target, false);
   startFullscreenRepairWatch();
-  return { ok: true, kind: fullscreenTargetKind };
+  return { ok: true };
 }
 
 document.addEventListener("yt-navigate-finish", () => scheduleFullscreenRepair(40), true);
