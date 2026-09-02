@@ -52,10 +52,41 @@ async function safeGetTab(tabId) {
   catch (_) { return null; }
 }
 
-async function getFocusedContext(preferredWindowId, preferredTabId) {
-  // Alt+C must always act on the Chrome window the user is actually looking at.
-  // Command/content-script events can arrive after a Clean Window transition has
-  // already moved the tab into another window, so never trust stale ids blindly.
+async function getFocusedContext(preferredWindowId, preferredTabId, inputSource = "unknown") {
+  // The official commands event can carry tab/window ids captured around the
+  // instant a Clean Window tab is moved into a popup. For that route, use the
+  // browser's *current* focused window as the single source of truth.
+  if (inputSource === "command") {
+    let focusedWindow = null;
+    try {
+      focusedWindow = await chrome.windows.getLastFocused({ populate: true });
+    } catch (_) {
+      return { window: null, tab: null };
+    }
+    if (!focusedWindow || focusedWindow.id == null || focusedWindow.focused === false) {
+      return { window: null, tab: null };
+    }
+    const activeTab = focusedWindow.tabs?.find((candidate) => candidate.active);
+    if (!activeTab || activeTab.id == null) return { window: null, tab: null };
+    return { window: focusedWindow, tab: activeTab };
+  }
+
+  // Content-script/action requests originate from a concrete window. Validate
+  // that exact window is still focused, so a delayed request from an older Clean
+  // Window can never affect the window the user has since switched away from.
+  if (Number.isInteger(preferredWindowId)) {
+    const preferredWindow = await safeGetWindow(preferredWindowId, true);
+    if (!preferredWindow || preferredWindow.id == null || preferredWindow.focused !== true) {
+      return { window: null, tab: null };
+    }
+    const activeTab = preferredWindow.tabs?.find((candidate) => candidate.active);
+    if (!activeTab || activeTab.id == null) return { window: null, tab: null };
+    if (Number.isInteger(preferredTabId) && preferredTabId !== activeTab.id) {
+      return { window: null, tab: null };
+    }
+    return { window: preferredWindow, tab: activeTab };
+  }
+
   let focusedWindow = null;
   try {
     focusedWindow = await chrome.windows.getLastFocused({ populate: true });
@@ -65,16 +96,8 @@ async function getFocusedContext(preferredWindowId, preferredTabId) {
   if (!focusedWindow || focusedWindow.id == null || focusedWindow.focused === false) {
     return { window: null, tab: null };
   }
-  if (Number.isInteger(preferredWindowId) && preferredWindowId !== focusedWindow.id) {
-    return { window: null, tab: null };
-  }
-
   const activeTab = focusedWindow.tabs?.find((candidate) => candidate.active);
-  if (!activeTab || activeTab.id == null) return { window: null, tab: null };
-  if (Number.isInteger(preferredTabId) && preferredTabId !== activeTab.id) {
-    return { window: null, tab: null };
-  }
-  return { window: focusedWindow, tab: activeTab };
+  return activeTab ? { window: focusedWindow, tab: activeTab } : { window: null, tab: null };
 }
 
 function isCrossInputDuplicate(tabId, source) {
@@ -644,7 +667,7 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   if (transitionInProgress) return;
   transitionInProgress = true;
   try {
-    const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
+    const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId, inputSource);
     if (!window || window.id == null || !tab || tab.id == null) return;
     if (isCrossInputDuplicate(tab.id, inputSource)) return;
     const sessions = await recoverSessions();
