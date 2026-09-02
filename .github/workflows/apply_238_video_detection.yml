@@ -1,0 +1,50 @@
+name: Apply 2.3.8 video detection fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply_238_video_detection.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply 2.3.8 patch
+        run: python tools/PATCH_238_VIDEO_DETECTION.py
+
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          m=json.loads(Path('manifest.json').read_text(encoding='utf-8'))
+          assert m['version']=='2.3.8', m['version']
+          bg=Path('background.js').read_text(encoding='utf-8')
+          wf=Path('windowed_fullscreen.js').read_text(encoding='utf-8')
+          assert 'originWindow.focused !== true' in bg
+          assert 'videoUsableScore' in wf
+          assert 'isYouTubeVideoRoute' in wf
+          assert 'youtubePlayer.isConnected' in wf
+          assert 'refreshCleanWindowShellState' in wf
+          assert 'visibilitychange' in wf
+          print('VALIDATE_238_VIDEO_DETECTION_OK')
+          PY
+
+      - name: Commit 2.3.8
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add windowed_fullscreen.js manifest.json
+          git commit -m 'Release 2.3.8 harden video detection and shell cleanup'
+          git push origin main
