@@ -1,0 +1,43 @@
+name: Identify local Clean Window file origins
+
+on:
+  push:
+    branches:
+      - diagnostics/local-hash-identify
+    paths:
+      - '.github/workflows/identify_local_hashes.yml'
+
+jobs:
+  identify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Search all commits for local file hashes
+        run: |
+          git fetch --all --prune
+          python - <<'PY'
+          import hashlib, subprocess
+
+          targets = {
+              'manifest.json': '8466cd4e25693963f332973d7a46c9ef1ec0e30cb32cdcf6afb6807ee82b55f3',
+              'background.js': 'e3b3cf33eb0f3d245b32d854b7aefcc04f0c00f58003a34f5d73540b832a53da',
+              'windowed_fullscreen.js': '7f78dd442c27e04ee201f6f32eefff91a39378e765b0a9155c3cccbe618c04c0',
+          }
+          commits = subprocess.check_output(['git','rev-list','--all'], text=True).splitlines()
+          found = {k: [] for k in targets}
+          for commit in commits:
+              for path, wanted in targets.items():
+                  try:
+                      data = subprocess.check_output(['git','show',f'{commit}:{path}'], stderr=subprocess.DEVNULL)
+                  except subprocess.CalledProcessError:
+                      continue
+                  if hashlib.sha256(data).hexdigest() == wanted:
+                      found[path].append(commit)
+          for path, matches in found.items():
+              print(f'LOCAL_HASH_MATCH_{path}=' + (','.join(matches) if matches else 'NONE'))
+              for commit in matches:
+                  msg = subprocess.check_output(['git','show','-s','--format=%s',commit], text=True).strip()
+                  print(f'  {commit} {msg}')
+          PY
