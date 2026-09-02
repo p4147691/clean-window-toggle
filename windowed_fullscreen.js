@@ -3,6 +3,7 @@ const TARGET_ATTRIBUTE = "data-clean-window-fullscreen-target";
 const ACTIVE_ATTRIBUTE = "data-clean-window-active";
 const MODE_ATTRIBUTE = "data-clean-window-mode";
 const TAB_STRIP_ID = "clean-window-tab-strip";
+const BORDER_ID = "clean-window-gold-border";
 let fullscreenTarget = null;
 let savedScrollX = 0;
 let savedScrollY = 0;
@@ -41,9 +42,20 @@ function installStyles() {
     }
 
     #${TAB_STRIP_ID},
-    #${TAB_STRIP_ID} * {
+    #${TAB_STRIP_ID} *,
+    #${BORDER_ID} {
       visibility: visible !important;
       box-sizing: border-box !important;
+    }
+
+    #${BORDER_ID} {
+      position: fixed !important;
+      inset: 0 !important;
+      display: block !important;
+      border: 2px solid #d9b84f !important;
+      box-shadow: inset 0 0 4px rgba(217, 184, 79, 0.32) !important;
+      pointer-events: none !important;
+      z-index: 2147483647 !important;
     }
 
     #${TAB_STRIP_ID} {
@@ -165,9 +177,19 @@ function installStyles() {
   (document.head || document.documentElement).append(style);
 }
 
+function renderGoldBorder(active) {
+  document.getElementById(BORDER_ID)?.remove();
+  if (!active) return;
+  const border = document.createElement("div");
+  border.id = BORDER_ID;
+  border.setAttribute("aria-hidden", "true");
+  document.documentElement.append(border);
+}
+
 function renderTabStrip(state) {
   document.getElementById(TAB_STRIP_ID)?.remove();
   if (!state?.active) {
+    renderGoldBorder(false);
     document.documentElement.removeAttribute(ACTIVE_ATTRIBUTE);
     document.documentElement.removeAttribute(MODE_ATTRIBUTE);
     return;
@@ -176,6 +198,7 @@ function renderTabStrip(state) {
   document.documentElement.setAttribute(ACTIVE_ATTRIBUTE, "");
   document.documentElement.setAttribute(MODE_ATTRIBUTE, state.mode || "clean");
   installStyles();
+  renderGoldBorder(state.mode === "windowed-fullscreen");
   if (!Array.isArray(state.tabs) || state.tabs.length < 2) return;
 
   const strip = document.createElement("div");
@@ -231,6 +254,7 @@ function findFullscreenTarget() {
 
 function setWindowedFullscreen(enabled) {
   if (!enabled) {
+    renderGoldBorder(false);
     document.documentElement.removeAttribute(ROOT_ATTRIBUTE);
     fullscreenTarget?.removeAttribute(TARGET_ATTRIBUTE);
     fullscreenTarget = null;
@@ -250,6 +274,7 @@ function setWindowedFullscreen(enabled) {
   fullscreenTarget = target;
   document.documentElement.setAttribute(ROOT_ATTRIBUTE, "");
   fullscreenTarget.setAttribute(TARGET_ATTRIBUTE, "");
+  renderGoldBorder(true);
   window.scrollTo(0, 0);
   window.dispatchEvent(new Event("resize"));
   requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));

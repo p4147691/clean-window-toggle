@@ -1,13 +1,16 @@
 const STORAGE_KEY = "cleanWindowSessionsV8";
+const FULLSCREEN_PENDING_KEY = "cleanWindowFullscreenPendingV1";
 const DESKTOP_EXTENSION_ID = "fcjhjgbebcebpdmfedcoabaonhfkjmfo";
 const NO_GROUP = -1;
 
 let transitionInProgress = false;
 const returningPopups = new Set();
+const pendingFullscreenTransitions = new Set();
+const fullscreenMaterializeTimers = new Map();
 
-function nativeWindowRequest(type) {
+function nativeWindowRequest(type, details = {}) {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(DESKTOP_EXTENSION_ID, { type }, (response) => {
+    chrome.runtime.sendMessage(DESKTOP_EXTENSION_ID, { type, ...details }, (response) => {
       if (chrome.runtime.lastError) {
         resolve({ ok: false, error: chrome.runtime.lastError.message });
         return;
@@ -24,6 +27,15 @@ async function getSessions() {
 
 async function saveSessions(sessions) {
   await chrome.storage.local.set({ [STORAGE_KEY]: sessions });
+}
+
+async function getFullscreenPending() {
+  const result = await chrome.storage.local.get(FULLSCREEN_PENDING_KEY);
+  return result[FULLSCREEN_PENDING_KEY] || {};
+}
+
+async function saveFullscreenPending(pending) {
+  await chrome.storage.local.set({ [FULLSCREEN_PENDING_KEY]: pending });
 }
 
 async function safeGetWindow(windowId, populate = false) {
@@ -51,6 +63,12 @@ async function getFocusedContext(preferredWindowId, preferredTabId) {
 function getBounds(window) {
   if (![window.left, window.top, window.width, window.height].every(Number.isInteger)) return null;
   return { left: window.left, top: window.top, width: window.width, height: window.height };
+}
+
+function boundsChanged(current, initial, tolerance = 3) {
+  if (!current || !initial) return false;
+  return ["left", "top", "width", "height"]
+    .some((key) => Math.abs(current[key] - initial[key]) > tolerance);
 }
 
 async function showWindow(windowId, bounds, focused = true) {
@@ -265,9 +283,12 @@ async function enterCleanWindow(tab, source, sessions) {
     if (popup?.id == null) throw new Error("Clean Window을 만들 수 없습니다.");
 
     const sourceStillExists = await safeGetWindow(source.id);
+    await showWindow(popup.id, bounds, true);
+    const popupInitialBounds = getBounds(await safeGetWindow(popup.id)) || bounds;
     const session = {
       sourceWindowId: sourceStillExists?.id ?? null,
       sourceBounds: bounds,
+      popupInitialBounds,
       mode: "clean",
       tabOrder,
       tabMeta: metadata,
@@ -313,6 +334,7 @@ async function enterWindowedFullscreen(tab, popup, session, sessions) {
 
 async function returnToNormalWindow(tab, popup, session, sessions) {
   const bounds = getBounds(popup) || session.sourceBounds;
+  const useChangedBounds = boundsChanged(bounds, session.popupInitialBounds || session.sourceBounds);
   await sendFullscreenMessage(tab.id, false);
   await sendTabMessage(tab.id, { type: "set-clean-window-shell", active: false });
   await nativeWindowRequest("restoreCleanWindowFrame");
@@ -329,7 +351,7 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
       await setMediaPaused(session.tabOrder, false);
       // 복귀 과정의 마지막 작업으로 원본 Chrome 창을 활성화한다.
       // 마지막 popup/임시 창이 닫힌 뒤 포커스가 빠지는 것을 방지한다.
-      await showWindow(source.id, bounds, true);
+      await showWindow(source.id, useChangedBounds ? bounds : null, true);
     } else {
       const normal = await chrome.windows.create({
         tabId: tab.id,
@@ -383,6 +405,7 @@ async function switchCleanWindowTab(popupId, targetTabId, sessions) {
       ...(bounds || {})
     });
     if (newPopup?.id == null) throw new Error("선택한 탭의 Clean Window을 만들지 못했습니다.");
+    session.popupInitialBounds = getBounds(newPopup) || bounds;
     await chrome.windows.update(source.id, { state: "minimized" });
     await setMediaPaused([targetTabId], false);
 
@@ -437,12 +460,70 @@ async function recoverSessions() {
     } else if (!source && session.sourceWindowId != null) {
       session.sourceWindowId = null;
       changed = true;
-    } else if (source && source.state !== "minimized") {
-      await chrome.windows.update(source.id, { state: "minimized" }).catch(() => {});
     }
   }
   if (changed) await saveSessions(sessions);
   return sessions;
+}
+
+async function materializeFullscreenMode(windowId) {
+  if (!Number.isInteger(windowId) || pendingFullscreenTransitions.has(windowId)) return;
+  pendingFullscreenTransitions.add(windowId);
+  try {
+    const pending = await getFullscreenPending();
+    const request = pending[String(windowId)];
+    if (!request) return;
+
+    const source = await safeGetWindow(windowId, true);
+    if (!source || source.state === "fullscreen") return;
+    const tab = source.tabs?.find((candidate) => candidate.id === request.tabId)
+      || source.tabs?.find((candidate) => candidate.active);
+    if (!tab) return;
+
+    const sessions = await getSessions();
+    const existingSession = sessions[String(windowId)];
+    if (request.kind === "existing-session" || existingSession) {
+      if (!existingSession) return;
+      const targetMode = request.kind === "existing-session"
+        ? request.mode
+        : (existingSession.mode === "clean" ? "windowed-fullscreen" : "normal");
+      if (targetMode === "windowed-fullscreen") {
+        await enterWindowedFullscreen(tab, source, existingSession, sessions);
+      } else if (targetMode === "normal") {
+        await returnToNormalWindow(tab, source, existingSession, sessions);
+      }
+      delete pending[String(windowId)];
+      await saveFullscreenPending(pending);
+      return;
+    }
+
+    await enterCleanWindow(tab, source, sessions);
+    const popupEntry = Object.entries(sessions)
+      .find(([, session]) => session.sourceWindowId === windowId);
+    if (request.mode === "windowed-fullscreen" && popupEntry) {
+      const popupId = Number(popupEntry[0]);
+      const session = popupEntry[1];
+      const popup = await safeGetWindow(popupId, true);
+      const popupTab = popup?.tabs?.find((candidate) => candidate.active);
+      if (popup && popupTab) await enterWindowedFullscreen(popupTab, popup, session, sessions);
+    }
+
+    delete pending[String(windowId)];
+    await saveFullscreenPending(pending);
+  } finally {
+    pendingFullscreenTransitions.delete(windowId);
+  }
+}
+
+function scheduleFullscreenMaterialize(windowId) {
+  if (!Number.isInteger(windowId)) return;
+  const previous = fullscreenMaterializeTimers.get(windowId);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    fullscreenMaterializeTimers.delete(windowId);
+    materializeFullscreenMode(windowId).catch(console.error);
+  }, 75);
+  fullscreenMaterializeTimers.set(windowId, timer);
 }
 
 async function toggleCleanWindow(preferredWindowId, preferredTabId) {
@@ -453,6 +534,39 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId) {
     if (!window || window.id == null || !tab || tab.id == null) return;
     const sessions = await recoverSessions();
     const session = sessions[String(window.id)];
+    const fullscreenPending = await getFullscreenPending();
+    const pendingRequest = fullscreenPending[String(window.id)];
+
+    if (window.state === "fullscreen") {
+      if (session) {
+        fullscreenPending[String(window.id)] = {
+          kind: "existing-session",
+          mode: "windowed-fullscreen",
+          tabId: tab.id
+        };
+        await saveFullscreenPending(fullscreenPending);
+        await chrome.windows.update(window.id, { state: "normal" });
+        scheduleFullscreenMaterialize(window.id);
+        return;
+      }
+      if (!pendingRequest) {
+        fullscreenPending[String(window.id)] = { mode: "clean", tabId: tab.id };
+        await saveFullscreenPending(fullscreenPending);
+        return;
+      }
+      if (pendingRequest.mode === "clean") {
+        pendingRequest.mode = "windowed-fullscreen";
+        pendingRequest.tabId = tab.id;
+        await saveFullscreenPending(fullscreenPending);
+        await chrome.windows.update(window.id, { state: "normal" });
+        scheduleFullscreenMaterialize(window.id);
+        return;
+      }
+    } else if (pendingRequest) {
+      await materializeFullscreenMode(window.id);
+      return;
+    }
+
     if (!session) {
       const parkedSession = Object.entries(sessions).find(([, candidate]) => candidate.sourceWindowId === window.id);
       if (parkedSession) {
@@ -543,11 +657,18 @@ chrome.tabs.onActivated.addListener(async ({ windowId }) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
-  if (!changeInfo.title) return;
   const sessions = await getSessions();
   for (const [popupKey, session] of Object.entries(sessions)) {
     if (tab.windowId === Number(popupKey) || tab.windowId === session.sourceWindowId) {
-      await publishSessionState(Number(popupKey), session).catch(() => {});
+      if (changeInfo.title || changeInfo.status === "complete") {
+        await publishSessionState(Number(popupKey), session).catch(() => {});
+      }
+      if (changeInfo.status === "complete"
+          && tab.windowId === Number(popupKey)
+          && tab.active
+          && session.mode === "windowed-fullscreen") {
+        await sendFullscreenMessage(tab.id, true).catch(() => {});
+      }
     }
   }
 });
@@ -579,6 +700,11 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
     }
   }
   if (changed) await saveSessions(sessions);
+});
+
+chrome.windows.onBoundsChanged.addListener((window) => {
+  if (!Number.isInteger(window?.id)) return;
+  scheduleFullscreenMaterialize(window.id);
 });
 
 recoverSessions().catch(console.error);
