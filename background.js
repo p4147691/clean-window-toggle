@@ -183,7 +183,9 @@ async function getSessionTabs(popupId, session) {
   const source = await safeGetWindow(session.sourceWindowId, true);
   if (source?.tabs) tabs.push(...source.tabs);
   const order = new Map(session.tabOrder.map((tabId, index) => [tabId, index]));
-  return tabs.sort((a, b) => (order.get(a.id) ?? 999999) - (order.get(b.id) ?? 999999));
+  return tabs
+    .filter((tab) => tab.id !== session.anchorTabId)
+    .sort((a, b) => (order.get(a.id) ?? 999999) - (order.get(b.id) ?? 999999));
 }
 
 async function publishSessionState(popupId, session) {
@@ -203,6 +205,30 @@ async function publishSessionState(popupId, session) {
   await Promise.all(popupTabs.map((tab) => sendTabMessage(tab.id, message)));
 }
 
+async function createSourceAnchorIfNeeded(source, sourceTabs) {
+  if (!Number.isInteger(source?.id) || sourceTabs.length !== 1) return null;
+  const anchor = await chrome.tabs.create({
+    windowId: source.id,
+    url: "about:blank",
+    active: false,
+    index: sourceTabs.length
+  });
+  return Number.isInteger(anchor?.id) ? anchor : null;
+}
+
+async function removeSourceAnchor(anchorTabId) {
+  if (!Number.isInteger(anchorTabId)) return;
+  const anchor = await safeGetTab(anchorTabId);
+  if (!anchor) return;
+  try { await chrome.tabs.remove(anchorTabId); } catch (_) {}
+}
+
+async function safeGetTab(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  try { return await chrome.tabs.get(tabId); }
+  catch (_) { return null; }
+}
+
 async function enterCleanWindow(tab, source, sessions) {
   if (source.type !== "normal") throw new Error("일반 Chrome 창에서 시작해야 합니다.");
   const sourceTabs = source.tabs || await chrome.tabs.query({ windowId: source.id });
@@ -215,7 +241,13 @@ async function enterCleanWindow(tab, source, sessions) {
   await setMediaPaused(parkedIds, true);
 
   let popup = null;
+  let anchorTab = null;
   try {
+    // When the active tab is the only tab, moving it directly into a popup can
+    // destroy the original Chrome window. Keep one invisible blank tab parked
+    // in that window so its HWND/window identity survives the Clean Window cycle.
+    anchorTab = await createSourceAnchorIfNeeded(source, sourceTabs);
+
     popup = await chrome.windows.create({
       tabId: tab.id,
       type: "popup",
@@ -230,7 +262,9 @@ async function enterCleanWindow(tab, source, sessions) {
       sourceBounds: bounds,
       mode: "clean",
       tabOrder,
-      tabMeta: metadata
+      tabMeta: metadata,
+      anchorTabId: anchorTab?.id ?? null,
+      sourceHadSingleTab: sourceTabs.length === 1
     };
     sessions[String(popup.id)] = session;
     await saveSessions(sessions);
@@ -247,9 +281,12 @@ async function enterCleanWindow(tab, source, sessions) {
       const sourceExists = await safeGetWindow(source.id);
       if (sourceExists) {
         try { await movePopupTabBack(tab.id, source.id, metadata[String(tab.id)]); } catch (_) {}
+        await removeSourceAnchor(anchorTab?.id);
         try { await showWindow(source.id, bounds); } catch (_) {}
       }
       returningPopups.delete(popup.id);
+    } else {
+      await removeSourceAnchor(anchorTab?.id);
     }
     throw error;
   }
@@ -278,6 +315,7 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
     if (source) {
       await movePopupTabBack(tab.id, source.id, session.tabMeta[String(tab.id)]);
       await chrome.tabs.update(tab.id, { active: true });
+      await removeSourceAnchor(session.anchorTabId);
       delete sessions[String(popup.id)];
       await saveSessions(sessions);
       await setMediaPaused(session.tabOrder, false);
@@ -377,7 +415,11 @@ async function recoverSessions() {
     const popup = await safeGetWindow(popupId);
     const source = await safeGetWindow(session.sourceWindowId);
     if (!popup) {
-      if (source) await showWindow(source.id, session.sourceBounds, true).catch(() => {});
+      if (source && Number.isInteger(session.anchorTabId)) {
+        await removeSourceAnchor(session.anchorTabId);
+      } else if (source) {
+        await showWindow(source.id, session.sourceBounds, true).catch(() => {});
+      }
       await setMediaPaused(session.tabOrder || [], false);
       delete sessions[popupKey];
       changed = true;
@@ -507,7 +549,11 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
     delete sessions[String(windowId)];
     await saveSessions(sessions);
     const source = await safeGetWindow(closedPopupSession.sourceWindowId);
-    if (source) await showWindow(source.id, closedPopupSession.sourceBounds, true).catch(() => {});
+    if (source && Number.isInteger(closedPopupSession.anchorTabId)) {
+      await removeSourceAnchor(closedPopupSession.anchorTabId);
+    } else if (source) {
+      await showWindow(source.id, closedPopupSession.sourceBounds, true).catch(() => {});
+    }
     await setMediaPaused(closedPopupSession.tabOrder || [], false);
     return;
   }

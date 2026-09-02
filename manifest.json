@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Clean Window Toggle",
-  "version": "2.2.0",
-  "description": "주소창과 탭바를 숨기고, 작은 Chrome 창 안에서 영상과 웹페이지를 풀스크린처럼 집중해서 봅니다.",
+  "version": "2.3.0",
+  "description": "원본 Chrome 창 정체성을 보존하는 Anchor 실험이 포함된 Clean Window 테스트 버전입니다.",
   "permissions": [
     "tabs",
     "storage",
@@ -36,14 +36,24 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["fullscreen_guard.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "fullscreen_guard.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["windowed_fullscreen.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "windowed_fullscreen.js"
+      ],
       "run_at": "document_idle"
     }
   ]
