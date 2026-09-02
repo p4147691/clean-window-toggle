@@ -1,0 +1,63 @@
+name: Validate Clean Window 2.3.2 anchor guardrails
+
+on:
+  push:
+    branches:
+      - release/2.3.2-safe8
+    paths:
+      - 'tools/APPLY_RELEASE_232.py'
+      - '.github/workflows/release_anchor_guardrails_232.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-validate-clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply 2.3.2 patch
+        run: python tools/APPLY_RELEASE_232.py
+
+      - name: Validate JavaScript and anchor invariants
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          node -e "const m=require('./manifest.json'); if(m.version!=='2.3.2') throw new Error('version');"
+          python - <<'PY'
+          from pathlib import Path
+          bg = Path('background.js').read_text(encoding='utf-8')
+          checks = {
+            'no about blank anchor': 'url: "about:blank"' not in bg,
+            'real new tab anchor': '// URL을 지정하지 않으면 Chrome의 평범한 새 탭(+) 화면이 열린다.' in bg,
+            'anchor url classifier': 'function isSyntheticAnchorUrl(url)' in bg,
+            'anchor user promotion': 'async function promoteAnchorToUserTab(tab, sessions)' in bg,
+            'navigation promotes anchor': 'changeInfo.url && !isSyntheticAnchorUrl(changeInfo.url)' in bg,
+            'anchor close reference cleanup': 'chrome.tabs.onRemoved.addListener' in bg and 'session.anchorTabId = null' in bg,
+            'anchor moved away cleanup': 'chrome.tabs.onAttached.addListener' in bg,
+            'popup gone preserves user tabs': 'async function cleanupSourceAfterPopupGone(session, source)' in bg and 'userTabs.length > 0' in bg,
+            'manual merge cleanup uses shared helper': 'cleanupSourceAfterPopupGone(closedPopupSession, source)' in bg,
+            'new source target metadata': 'if (!session.tabMeta[String(target.id)])' in bg,
+            'anchor still hidden from clean shell': '.filter((tab) => tab.id !== session.anchorTabId)' in bg,
+            'single tab only': 'sourceTabs.length !== 1' in bg,
+            'safe return retained': 'movePopupTabBack(tab.id, source.id' in bg,
+          }
+          bad = [name for name, ok in checks.items() if not ok]
+          if bad:
+            raise SystemExit('Missing invariants: ' + ', '.join(bad))
+          print('Clean Window 2.3.2 anchor guardrails OK')
+          PY
+          git diff --check
+
+      - name: Commit production-only changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm tools/APPLY_RELEASE_232.py .github/workflows/release_anchor_guardrails_232.yml
+          git add background.js manifest.json README.md
+          git commit -m "Release 2.3.2 anchor guardrails"
+          git push origin HEAD:release/2.3.2-safe8
