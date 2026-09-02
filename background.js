@@ -113,12 +113,42 @@ function sendTabMessage(tabId, message) {
   });
 }
 
+const CONTENT_RUNTIME_VERSION = chrome.runtime.getManifest().version;
+
+async function ensureContentRuntimeCurrent(tabId) {
+  if (!Number.isInteger(tabId)) return { ok: false, error: "invalid-tab" };
+  let probe = await sendTabMessage(tabId, { type: "clean-window-runtime-probe" });
+
+  // 2.3.8 and older tabs do not understand the probe. Never force-inject over
+  // those pages because their anonymous listeners cannot be safely detached.
+  if (!probe?.ok || probe.hotReload !== true) {
+    return { ok: true, legacy: true, version: probe?.version || null };
+  }
+  if (probe.version === CONTENT_RUNTIME_VERSION) return probe;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["windowed_fullscreen.js"]
+    });
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
+
+  probe = await sendTabMessage(tabId, { type: "clean-window-runtime-probe" });
+  if (!probe?.ok || probe.version !== CONTENT_RUNTIME_VERSION) {
+    return { ok: false, error: "runtime-hot-reload-verification-failed" };
+  }
+  return probe;
+}
+
 async function setMediaPaused(tabIds, paused) {
   const type = paused ? "pause-clean-window-media" : "resume-clean-window-media";
   await Promise.all(tabIds.filter(Number.isInteger).map((tabId) => sendTabMessage(tabId, { type })));
 }
 
 async function sendFullscreenMessage(tabId, enabled) {
+  await ensureContentRuntimeCurrent(tabId).catch(() => {});
   if (enabled) {
     try {
       await chrome.scripting.executeScript({
@@ -642,6 +672,7 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   try {
     const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
     if (!window || window.id == null || !tab || tab.id == null) return;
+    await ensureContentRuntimeCurrent(tab.id).catch(() => {});
     const sessions = await recoverSessions();
     const session = sessions[String(window.id)];
     const fullscreenPending = await getFullscreenPending();
@@ -875,3 +906,15 @@ chrome.windows.onBoundsChanged.addListener((window) => {
 });
 
 recoverSessions().catch(console.error);
+
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== "update") return;
+  chrome.tabs.query({}).then(async (tabs) => {
+    for (const tab of tabs) {
+      if (!Number.isInteger(tab.id)) continue;
+      if (!/^https?:/i.test(tab.url || "")) continue;
+      await ensureContentRuntimeCurrent(tab.id).catch(() => {});
+    }
+  }).catch(() => {});
+});

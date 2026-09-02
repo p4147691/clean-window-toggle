@@ -1,16 +1,31 @@
+(() => {
+const RUNTIME_VERSION = "2.3.9";
+const RUNTIME_KEY = "__cleanWindowRuntimeV1";
+const MESSAGE_BRIDGE_KEY = "__cleanWindowRuntimeMessageBridgeV1";
+const previousRuntime = globalThis[RUNTIME_KEY];
+const previousSnapshot = previousRuntime?.hotReload === true && typeof previousRuntime.snapshot === "function"
+  ? previousRuntime.snapshot()
+  : null;
+if (previousRuntime?.hotReload === true && typeof previousRuntime.dispose === "function") {
+  previousRuntime.dispose();
+}
+const runtimeAbort = new AbortController();
+
 const ROOT_ATTRIBUTE = "data-clean-window-fullscreen";
 const TARGET_ATTRIBUTE = "data-clean-window-fullscreen-target";
 const ACTIVE_ATTRIBUTE = "data-clean-window-active";
 const MODE_ATTRIBUTE = "data-clean-window-mode";
 const TAB_STRIP_ID = "clean-window-tab-strip";
 const BORDER_ID = "clean-window-gold-border";
-let fullscreenTarget = null;
-let savedScrollX = 0;
-let savedScrollY = 0;
+let fullscreenTarget = previousSnapshot?.fullscreenTarget?.isConnected
+  ? previousSnapshot.fullscreenTarget
+  : document.querySelector(`[${TARGET_ATTRIBUTE}]`);
+let savedScrollX = Number(previousSnapshot?.savedScrollX) || 0;
+let savedScrollY = Number(previousSnapshot?.savedScrollY) || 0;
 let lastToggleRequestAt = 0;
 let fullscreenObserver = null;
 let fullscreenRepairTimer = null;
-const pausedMedia = new Set();
+const pausedMedia = new Set(previousSnapshot?.pausedMedia || []);
 
 function installStyles() {
   if (document.getElementById("clean-window-fullscreen-style")) return;
@@ -358,12 +373,16 @@ function setWindowedFullscreen(enabled) {
   return { ok: true };
 }
 
-document.addEventListener("yt-navigate-finish", () => scheduleFullscreenRepair(40), true);
-window.addEventListener("popstate", () => scheduleFullscreenRepair(40), true);
-window.addEventListener("hashchange", () => scheduleFullscreenRepair(40), true);
-window.addEventListener("pageshow", () => scheduleFullscreenRepair(40), true);
+document.addEventListener("yt-navigate-finish", () => scheduleFullscreenRepair(40), { capture: true, signal: runtimeAbort.signal });
+window.addEventListener("popstate", () => scheduleFullscreenRepair(40), { capture: true, signal: runtimeAbort.signal });
+window.addEventListener("hashchange", () => scheduleFullscreenRepair(40), { capture: true, signal: runtimeAbort.signal });
+window.addEventListener("pageshow", () => scheduleFullscreenRepair(40), { capture: true, signal: runtimeAbort.signal });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function handleRuntimeMessage(message, _sender, sendResponse) {
+  if (message?.type === "clean-window-runtime-probe") {
+    sendResponse({ ok: true, version: RUNTIME_VERSION, hotReload: true });
+    return false;
+  }
   if (message?.type === "set-windowed-fullscreen") {
     sendResponse(setWindowedFullscreen(Boolean(message.enabled)));
     return false;
@@ -393,7 +412,40 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   return false;
-});
+}
+
+function snapshotRuntimeState() {
+  return {
+    savedScrollX,
+    savedScrollY,
+    fullscreenTarget: fullscreenTarget?.isConnected ? fullscreenTarget : null,
+    pausedMedia: [...pausedMedia]
+  };
+}
+
+function disposeRuntime() {
+  runtimeAbort.abort();
+  stopFullscreenRepairWatch();
+}
+
+const runtimeApi = {
+  version: RUNTIME_VERSION,
+  hotReload: true,
+  snapshot: snapshotRuntimeState,
+  dispose: disposeRuntime,
+  handleMessage: handleRuntimeMessage
+};
+globalThis[RUNTIME_KEY] = runtimeApi;
+
+if (!globalThis[MESSAGE_BRIDGE_KEY]) {
+  const bridge = (message, sender, sendResponse) => {
+    const current = globalThis[RUNTIME_KEY];
+    if (!current || typeof current.handleMessage !== "function") return false;
+    return current.handleMessage(message, sender, sendResponse);
+  };
+  chrome.runtime.onMessage.addListener(bridge);
+  globalThis[MESSAGE_BRIDGE_KEY] = bridge;
+}
 
 function refreshCleanWindowShellState() {
   chrome.runtime.sendMessage({ type: "get-clean-window-shell" }, (response) => {
@@ -403,10 +455,10 @@ function refreshCleanWindowShellState() {
 }
 
 refreshCleanWindowShellState();
-window.addEventListener("pageshow", () => setTimeout(refreshCleanWindowShellState, 0), true);
+window.addEventListener("pageshow", () => setTimeout(refreshCleanWindowShellState, 0), { capture: true, signal: runtimeAbort.signal });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshCleanWindowShellState();
-}, true);
+}, { capture: true, signal: runtimeAbort.signal });
 
 function isContainedFullscreenActive() {
   return document.documentElement.hasAttribute(ROOT_ATTRIBUTE);
@@ -440,4 +492,11 @@ document.addEventListener("keydown", (event) => {
   if (now - lastToggleRequestAt < 500) return;
   lastToggleRequestAt = now;
   chrome.runtime.sendMessage({ type: "toggle-clean-window-request" });
-}, true);
+}, { capture: true, signal: runtimeAbort.signal });
+
+
+if (document.documentElement.hasAttribute(ROOT_ATTRIBUTE)) {
+  fullscreenTarget ||= document.querySelector(`[${TARGET_ATTRIBUTE}]`);
+  startFullscreenRepairWatch();
+}
+})();
