@@ -4,6 +4,8 @@ const DESKTOP_EXTENSION_ID = "fcjhjgbebcebpdmfedcoabaonhfkjmfo";
 const NO_GROUP = -1;
 
 let transitionInProgress = false;
+let lastToggleInput = { tabId: null, source: null, at: 0 };
+const CROSS_INPUT_DEDUPE_MS = 400;
 const returningPopups = new Set();
 const pendingFullscreenTransitions = new Set();
 const fullscreenMaterializeTimers = new Map();
@@ -51,13 +53,38 @@ async function safeGetTab(tabId) {
 }
 
 async function getFocusedContext(preferredWindowId, preferredTabId) {
-  const window = Number.isInteger(preferredWindowId)
-    ? await chrome.windows.get(preferredWindowId, { populate: true })
-    : await chrome.windows.getLastFocused({ populate: true });
-  const tab = Number.isInteger(preferredTabId)
-    ? window.tabs?.find((candidate) => candidate.id === preferredTabId)
-    : window.tabs?.find((candidate) => candidate.active);
-  return { window, tab };
+  // Alt+C must always act on the Chrome window the user is actually looking at.
+  // Command/content-script events can arrive after a Clean Window transition has
+  // already moved the tab into another window, so never trust stale ids blindly.
+  let focusedWindow = null;
+  try {
+    focusedWindow = await chrome.windows.getLastFocused({ populate: true });
+  } catch (_) {
+    return { window: null, tab: null };
+  }
+  if (!focusedWindow || focusedWindow.id == null || focusedWindow.focused === false) {
+    return { window: null, tab: null };
+  }
+  if (Number.isInteger(preferredWindowId) && preferredWindowId !== focusedWindow.id) {
+    return { window: null, tab: null };
+  }
+
+  const activeTab = focusedWindow.tabs?.find((candidate) => candidate.active);
+  if (!activeTab || activeTab.id == null) return { window: null, tab: null };
+  if (Number.isInteger(preferredTabId) && preferredTabId !== activeTab.id) {
+    return { window: null, tab: null };
+  }
+  return { window: focusedWindow, tab: activeTab };
+}
+
+function isCrossInputDuplicate(tabId, source) {
+  const now = Date.now();
+  const duplicate = Number.isInteger(tabId)
+    && lastToggleInput.tabId === tabId
+    && lastToggleInput.source !== source
+    && now - lastToggleInput.at < CROSS_INPUT_DEDUPE_MS;
+  if (!duplicate) lastToggleInput = { tabId, source, at: now };
+  return duplicate;
 }
 
 function getBounds(window) {
@@ -613,12 +640,13 @@ function scheduleFullscreenMaterialize(windowId) {
   fullscreenMaterializeTimers.set(windowId, timer);
 }
 
-async function toggleCleanWindow(preferredWindowId, preferredTabId) {
+async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource = "unknown") {
   if (transitionInProgress) return;
   transitionInProgress = true;
   try {
     const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
     if (!window || window.id == null || !tab || tab.id == null) return;
+    if (isCrossInputDuplicate(tab.id, inputSource)) return;
     const sessions = await recoverSessions();
     const session = sessions[String(window.id)];
     const fullscreenPending = await getFullscreenPending();
@@ -673,7 +701,7 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId) {
 }
 
 chrome.action.onClicked.addListener((tab) => {
-  toggleCleanWindow(tab?.windowId, tab?.id).catch(console.error);
+  toggleCleanWindow(tab?.windowId, tab?.id, "action").catch(console.error);
 });
 
 // 페이지나 주소창 중 어디에 키보드 포커스가 있든 Chrome이 활성 상태이면
@@ -681,12 +709,12 @@ chrome.action.onClicked.addListener((tab) => {
 // popup에서 commands 이벤트가 누락되는 환경을 위한 보조 경로로 유지한다.
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command !== "toggle-clean-window") return;
-  toggleCleanWindow(tab?.windowId, tab?.id).catch(console.error);
+  toggleCleanWindow(tab?.windowId, tab?.id, "command").catch(console.error);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "toggle-clean-window-request") {
-    toggleCleanWindow(sender.tab?.windowId, sender.tab?.id).catch(console.error);
+    toggleCleanWindow(sender.tab?.windowId, sender.tab?.id, "content").catch(console.error);
     return false;
   }
   if (message?.type === "windowed-fullscreen-video-gone") {
