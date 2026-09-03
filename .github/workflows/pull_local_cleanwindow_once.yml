@@ -9,7 +9,7 @@ on:
 
 jobs:
   pull-local:
-    runs-on: [self-hosted, Windows, X64, cleanwindow-local]
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 10
     steps:
       - name: Fast-forward local Clean Window clone
