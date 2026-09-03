@@ -7,6 +7,7 @@ let transitionInProgress = false;
 const returningPopups = new Set();
 const pendingFullscreenTransitions = new Set();
 const fullscreenMaterializeTimers = new Map();
+const fullscreenReapplyTimers = new Map();
 
 function nativeWindowRequest(type, details = {}) {
   return new Promise((resolve) => {
@@ -450,8 +451,32 @@ async function enterWindowedFullscreen(tab, popup, session, sessions) {
   return true;
 }
 
+function cancelFullscreenReapply(popupId) {
+  const timer = fullscreenReapplyTimers.get(popupId);
+  if (timer) clearTimeout(timer);
+  fullscreenReapplyTimers.delete(popupId);
+}
+
+function scheduleFullscreenReapply(popupId, tabId) {
+  cancelFullscreenReapply(popupId);
+  const timer = setTimeout(async () => {
+    fullscreenReapplyTimers.delete(popupId);
+    const latestSessions = await getSessions();
+    const latestSession = latestSessions[String(popupId)];
+    if (latestSession?.mode !== "windowed-fullscreen") return;
+    const latestTab = await safeGetTab(tabId);
+    if (!latestTab || latestTab.windowId !== popupId || latestTab.active !== true) return;
+    await sendFullscreenMessage(tabId, true).catch(() => {});
+  }, 120);
+  fullscreenReapplyTimers.set(popupId, timer);
+}
+
 async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
   if (!session || session.mode !== "windowed-fullscreen") return;
+  cancelFullscreenReapply(popupId);
+  const popup = await safeGetWindow(popupId, true);
+  const activeTab = popup?.tabs?.find((candidate) => candidate.active);
+  if (activeTab?.id != null) await sendFullscreenMessage(activeTab.id, false).catch(() => {});
   await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
   session.mode = "clean";
   session.contentFullscreen = false;
@@ -462,6 +487,7 @@ async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
 }
 
 async function returnToNormalWindow(tab, popup, session, sessions) {
+  cancelFullscreenReapply(popup.id);
   const bounds = getBounds(popup) || session.sourceBounds;
   const useChangedBounds = boundsChanged(bounds, session.popupInitialBounds || session.sourceBounds);
   await sendFullscreenMessage(tab.id, false);
@@ -830,7 +856,7 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
           && tab.windowId === Number(popupKey)
           && tab.active
           && session.mode === "windowed-fullscreen") {
-        setTimeout(() => sendFullscreenMessage(tab.id, true).catch(() => {}), 120);
+        scheduleFullscreenReapply(Number(popupKey), tab.id);
       }
     }
   }
