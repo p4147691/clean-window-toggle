@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/pull_local_cleanwindow_once.yml'
       - 'RUNNER_INFO.txt'
+      - 'store-assets/**'
   workflow_dispatch:
 
 jobs:
