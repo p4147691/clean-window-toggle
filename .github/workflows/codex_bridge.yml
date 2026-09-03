@@ -1,0 +1,42 @@
+name: Clean Window ChatGPT Codex Bridge
+
+on:
+  push:
+    branches:
+      - 'codex-request/**'
+    paths:
+      - '.codex-bridge/request.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: clean-window-codex-bridge
+  cancel-in-progress: false
+
+jobs:
+  codex-bridge:
+    runs-on: [self-hosted, Windows, X64, cleanwindow-local]
+    timeout-minutes: 45
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout bridge request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Execute isolated Codex request
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requestPath = Join-Path $env:GITHUB_WORKSPACE '.codex-bridge\request.json'
+          if (-not (Test-Path -LiteralPath $requestPath)) {
+            throw 'Bridge request file is missing. workflow_dispatch requires a request file on the selected ref.'
+          }
+          $bridge = Join-Path $env:GITHUB_WORKSPACE 'tools\codex_bridge.ps1'
+          powershell -NoProfile -ExecutionPolicy Bypass -File $bridge -RequestPath $requestPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
