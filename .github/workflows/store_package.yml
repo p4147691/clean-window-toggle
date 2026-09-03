@@ -1,0 +1,59 @@
+name: Build Chrome Web Store Package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'manifest.json'
+      - 'background.js'
+      - 'windowed_fullscreen.js'
+      - 'fullscreen_guard.js'
+      - 'icons/**'
+      - '.github/workflows/store_package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate extension runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check background.js
+          node --check windowed_fullscreen.js
+          node --check fullscreen_guard.js
+          node --test tests/background-cycle-regression.test.js
+          node -e "const m=require('./manifest.json'); if(m.manifest_version!==3) throw new Error('expected MV3'); if(!/^\\d+\\.\\d+\\.\\d+$/.test(m.version)) throw new Error('invalid version'); console.log('VERSION='+m.version)"
+
+      - name: Build store ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./manifest.json').version")"
+          PACKAGE="clean-window-toggle-${VERSION}-chrome-web-store.zip"
+          rm -f "$PACKAGE"
+          zip -r "$PACKAGE" \
+            manifest.json \
+            background.js \
+            windowed_fullscreen.js \
+            fullscreen_guard.js \
+            icons
+          echo "PACKAGE=$PACKAGE" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          unzip -l "$PACKAGE"
+
+      - name: Upload store package
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-window-toggle-${{ env.VERSION }}-chrome-web-store
+          path: ${{ env.PACKAGE }}
+          if-no-files-found: error
+          retention-days: 30
