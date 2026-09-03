@@ -1,0 +1,60 @@
+name: Apply 2.3.11 normal-window bounds fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply_return_bounds_fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply focused fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          bg = Path('background.js')
+          text = bg.read_text(encoding='utf-8')
+          old = 'await showWindow(source.id, useChangedBounds ? bounds : null, true);'
+          new = 'await showWindow(source.id, useChangedBounds ? bounds : session.sourceBounds, true);'
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected exactly one return-bounds target, found {text.count(old)}')
+          bg.write_text(text.replace(old, new), encoding='utf-8')
+
+          manifest = Path('manifest.json')
+          m = manifest.read_text(encoding='utf-8')
+          oldv = '"version": "2.3.10"'
+          newv = '"version": "2.3.11"'
+          if m.count(oldv) != 1:
+              raise SystemExit('Unexpected manifest version state')
+          manifest.write_text(m.replace(oldv, newv), encoding='utf-8')
+
+          runtime = Path('windowed_fullscreen.js')
+          r = runtime.read_text(encoding='utf-8')
+          oldr = 'const RUNTIME_VERSION = "2.3.10";'
+          newr = 'const RUNTIME_VERSION = "2.3.11";'
+          if r.count(oldr) != 1:
+              raise SystemExit('Unexpected runtime version state')
+          runtime.write_text(r.replace(oldr, newr), encoding='utf-8')
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          python -m json.tool manifest.json >/dev/null
+          git diff --check
+          git diff -- background.js manifest.json windowed_fullscreen.js
+      - name: Commit product changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add background.js manifest.json windowed_fullscreen.js
+          git commit -m "Fix normal-window return bounds and bump 2.3.11"
+          git push origin HEAD:main
