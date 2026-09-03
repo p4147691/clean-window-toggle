@@ -13,13 +13,23 @@ async function runtime(url = 'chrome://newtab/', options = {}) {
   let nextWindow = 30, nextTab = 300, nextTimer = 1, desktop = 'A';
   const timers = new Map(), windows = new Map(), tabs = new Map();
   const storage = {}, errors = [], activations = [];
+  const lifecycleJobs = [], delayedWrites = [];
   const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); } });
   const chrome = {
     runtime: { getManifest: () => manifest, onMessage: event(), onInstalled: event(),
       sendMessage(_id, _message, callback) { callback({ ok: true }); } },
     commands: { onCommand: event() }, action: { onClicked: event() },
     storage: { local: { get: async key => ({ [key]: clone(storage[key]) }),
-      set: async values => Object.assign(storage, clone(values)) } },
+      set: async values => {
+        const copy = clone(values);
+        if (options.delayAnchorEventWrite && copy.cleanWindowSessionsV8) {
+          const before = storage.cleanWindowSessionsV8 || {};
+          const clearsAnchor = Object.entries(copy.cleanWindowSessionsV8).some(([key, session]) =>
+            before[key]?.anchorTabId != null && session.anchorTabId === null);
+          if (clearsAnchor) await new Promise(resolve => delayedWrites.push(resolve));
+        }
+        Object.assign(storage, copy);
+      } } },
     tabGroups: {}, windows: { onRemoved: event(), onBoundsChanged: event() },
     tabs: { onActivated: event(), onUpdated: event(), onCreated: event(),
       onRemoved: event(), onAttached: event() },
@@ -96,7 +106,15 @@ async function runtime(url = 'chrome://newtab/', options = {}) {
       Object.assign(tab, values); return clone(tab);
     },
     move: async (id, values) => { move(tabs.get(id), values.windowId); return clone(tabs.get(id)); },
-    remove: async id => { const tab = tabs.get(id); tabs.delete(id); if (tab) normalize(tab.windowId); },
+    remove: async id => {
+      const tab = tabs.get(id); tabs.delete(id);
+      if (tab && options.emitAnchorRemoval) {
+        for (const listener of chrome.tabs.onRemoved.listeners) {
+          lifecycleJobs.push(Promise.resolve(listener(id, { windowId: tab.windowId, isWindowClosing: false })));
+        }
+      }
+      if (tab) normalize(tab.windowId);
+    },
     sendMessage(id, message, callback) {
       const tab = tabs.get(id);
       if (!tab || !/^https?:/.test(tab.url)) {
@@ -121,10 +139,17 @@ async function runtime(url = 'chrome://newtab/', options = {}) {
   await settle();
   return { context, windows, tabs, errors, activations,
     get sessions() { return storage.cleanWindowSessionsV8 || {}; },
+    get lastFailure() { return storage.cleanWindowLastFailureV1; },
     get popupId() { return tabs.get(100).windowId; }, focus,
     async command(eventTab = tabs.get(100)) {
       chrome.commands.onCommand.listeners[0]('toggle-clean-window', clone(eventTab));
       await settle(); assert.deepEqual(errors, []);
+    },
+    async settleLifecycle() {
+      for (const release of delayedWrites.splice(0)) release();
+      await Promise.all(lifecycleJobs);
+      await settle();
+      assert.deepEqual(errors, []);
     },
     async runTimers() {
       const batch = [...timers.values()]; timers.clear();
@@ -208,4 +233,25 @@ test('queue ignores unfocused B but follows A tab into its own popup', async () 
 test('content runtime version agrees with manifest', () => {
   const content = fs.readFileSync('windowed_fullscreen.js', 'utf8');
   assert.equal(content.match(/const RUNTIME_VERSION = "([^"]+)"/)[1], manifest.version);
+});
+test('late anchor onRemoved write cannot resurrect a completed session', async () => {
+  const r = await runtime('https://example.org/video', {
+    emitAnchorRemoval: true, delayAnchorEventWrite: true
+  });
+  await r.command(); await r.command(); await r.command();
+  assert.equal(r.tabs.get(100).windowId, 10);
+  await r.settleLifecycle();
+  assert.deepEqual(r.sessions, {}, 'completed session must stay deleted after lifecycle events settle');
+});
+test('last mode-3 failure survives the normal finish diagnostic', async () => {
+  const r = await runtime('https://example.org/', { transient: true });
+  await r.command(); await r.command();
+  assert.equal(r.lastFailure.stage, 'mode3-failed');
+  assert.equal(r.lastFailure.error, 'temporary runtime failure');
+  assert.equal(r.lastFailure.version, manifest.version);
+});
+test('a failed serialized task does not poison later session operations', async () => {
+  const r = await runtime();
+  await assert.rejects(vm.runInContext("runSessionOperation(async () => { throw Error('test failure'); })", r.context));
+  assert.equal(await vm.runInContext('runSessionOperation(async () => 42)', r.context), 42);
 });
