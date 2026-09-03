@@ -4,8 +4,6 @@ const DESKTOP_EXTENSION_ID = "fcjhjgbebcebpdmfedcoabaonhfkjmfo";
 const NO_GROUP = -1;
 
 let transitionInProgress = false;
-let queuedToggleRequest = null;
-let lastToggleInput = null;
 const returningPopups = new Set();
 const pendingFullscreenTransitions = new Set();
 const fullscreenMaterializeTimers = new Map();
@@ -698,22 +696,6 @@ function scheduleFullscreenMaterialize(windowId) {
   fullscreenMaterializeTimers.set(windowId, timer);
 }
 
-function isCrossInputDuplicate(windowId, tabId, inputSource) {
-  const now = Date.now();
-  const previous = lastToggleInput;
-  const isShortcutSource = inputSource === "command" || inputSource === "content";
-  const isDuplicate = Boolean(
-    isShortcutSource
-    && previous
-    && (previous.inputSource === "command" || previous.inputSource === "content")
-    && previous.inputSource !== inputSource
-    && previous.tabId === tabId
-    && now - previous.at < 350
-  );
-  if (!isDuplicate) lastToggleInput = { windowId, tabId, inputSource, at: now };
-  return isDuplicate;
-}
-
 async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource = "unknown") {
   // Resolve the real origin before taking the global transition lock. Chrome can
   // briefly emit a stale command event for the parked/previous window after SPA
@@ -722,20 +704,15 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
   if (!window || window.id == null || !tab || tab.id == null) return;
 
-  // Chrome can deliver one Alt+C through both commands and the content-script
-  // fallback. Treat those two deliveries as one gesture, but never discard a
-  // genuinely later gesture just because the previous transition is still
-  // finishing cleanup.
-  if (isCrossInputDuplicate(window.id, tab.id, inputSource)) return;
-  if (transitionInProgress) {
-    queuedToggleRequest = {
-      preferredWindowId: window.id,
-      preferredTabId: tab.id,
-      inputSource
-    };
-    return;
-  }
+  // Input ownership is mode-specific: normal Chrome uses commands, while an
+  // active Clean Window popup uses only the content-script keydown path. This
+  // prevents the same Alt+C gesture from racing through two asynchronous paths.
+  const currentSessions = await getSessions();
+  const directSession = currentSessions[String(window.id)];
+  if (inputSource === "command" && directSession) return;
+  if (inputSource === "content" && !directSession) return;
 
+  if (transitionInProgress) return;
   transitionInProgress = true;
   try {
     await ensureContentRuntimeCurrent(tab.id).catch(() => {});
@@ -799,17 +776,6 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
     else await returnToNormalWindow(tab, window, session, sessions);
   } finally {
     transitionInProgress = false;
-    const queued = queuedToggleRequest;
-    queuedToggleRequest = null;
-    if (queued) {
-      setTimeout(() => {
-        toggleCleanWindow(
-          queued.preferredWindowId,
-          queued.preferredTabId,
-          queued.inputSource
-        ).catch(console.error);
-      }, 0);
-    }
   }
 }
 
