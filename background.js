@@ -534,6 +534,27 @@ async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
   await publishSessionState(popupId, session).catch(() => {});
 }
 
+async function waitForRestoredWindowStable(windowId, tabId, timeoutMs = 1200) {
+  const deadline = Date.now() + timeoutMs;
+  let stableHits = 0;
+  while (Date.now() < deadline) {
+    const restored = await safeGetWindow(windowId, true);
+    const activeTab = restored?.tabs?.find((candidate) => candidate.active);
+    const stable = restored
+      && restored.state !== "minimized"
+      && restored.focused === true
+      && activeTab?.id === tabId;
+    if (stable) {
+      stableHits += 1;
+      if (stableHits >= 2) return true;
+    } else {
+      stableHits = 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+  return false;
+}
+
 async function returnToNormalWindow(tab, popup, session, sessions) {
   cancelFullscreenReapply(popup.id);
   const bounds = getBounds(popup) || session.sourceBounds;
@@ -557,6 +578,9 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
       // 복귀 과정의 마지막 작업으로 원본 Chrome 창을 활성화한다.
       // 마지막 popup/임시 창이 닫힌 뒤 포커스가 빠지는 것을 방지한다.
       await showWindow(source.id, useChangedBounds ? bounds : session.sourceBounds, true);
+      await recordTransitionDebug("normal-restore-wait", { windowId: source.id, tabId: tab.id });
+      const restoreStable = await waitForRestoredWindowStable(source.id, tab.id);
+      await recordTransitionDebug(restoreStable ? "normal-restore-stable" : "normal-restore-timeout", { windowId: source.id, tabId: tab.id });
     } else {
       const normal = await chrome.windows.create({
         tabId: tab.id,
