@@ -5,7 +5,7 @@ const NO_GROUP = -1;
 
 let transitionInProgress = false;
 let transitionStartedAt = 0;
-let transitionRetryRequested = false;
+let transitionRetryCount = 0;
 let transitionSerial = 0;
 const TRANSITION_STALE_MS = 2500;
 const DEBUG_KEY = "cleanWindowTransitionDebugV1";
@@ -42,14 +42,17 @@ async function recordTransitionDebug(stage, details = {}) {
 }
 
 function scheduleQueuedToggle() {
-  if (!transitionRetryRequested || transitionInProgress) return;
-  transitionRetryRequested = false;
+  if (transitionRetryCount <= 0 || transitionInProgress) return;
+  transitionRetryCount -= 1;
   setTimeout(() => {
     getActuallyFocusedContext().then(({ window, tab }) => {
-      if (!window || !tab) return;
+      if (!window || !tab) {
+        scheduleQueuedToggle();
+        return;
+      }
       return toggleCleanWindow(window.id, tab.id, "command-retry");
     }).catch(console.error);
-  }, 60);
+  }, 35);
 }
 
 async function getSessions() {
@@ -578,9 +581,15 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
       // 복귀 과정의 마지막 작업으로 원본 Chrome 창을 활성화한다.
       // 마지막 popup/임시 창이 닫힌 뒤 포커스가 빠지는 것을 방지한다.
       await showWindow(source.id, useChangedBounds ? bounds : session.sourceBounds, true);
-      await recordTransitionDebug("normal-restore-wait", { windowId: source.id, tabId: tab.id });
-      const restoreStable = await waitForRestoredWindowStable(source.id, tab.id);
-      await recordTransitionDebug(restoreStable ? "normal-restore-stable" : "normal-restore-timeout", { windowId: source.id, tabId: tab.id });
+      // Focus verification is diagnostic only. Do not hold the global Alt+C
+      // transition lock while Chrome settles the restored normal window.
+      recordTransitionDebug("normal-restore-wait", { windowId: source.id, tabId: tab.id }).catch(() => {});
+      waitForRestoredWindowStable(source.id, tab.id, 420)
+        .then((restoreStable) => recordTransitionDebug(
+          restoreStable ? "normal-restore-stable" : "normal-restore-timeout",
+          { windowId: source.id, tabId: tab.id }
+        ))
+        .catch(() => {});
     } else {
       const normal = await chrome.windows.create({
         tabId: tab.id,
@@ -779,8 +788,8 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   const now = Date.now();
   if (transitionInProgress) {
     if (now - transitionStartedAt < TRANSITION_STALE_MS) {
-      transitionRetryRequested = true;
-      await recordTransitionDebug("queued", { windowId: window.id, tabId: tab.id, inputSource });
+      transitionRetryCount = Math.min(transitionRetryCount + 1, 3);
+      await recordTransitionDebug("queued", { windowId: window.id, tabId: tab.id, inputSource, queuedCount: transitionRetryCount });
       return;
     }
     // A previous transition exceeded the guard interval. Do not leave Alt+C
