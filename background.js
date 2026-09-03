@@ -10,10 +10,21 @@ let transitionSerial = 0;
 const TRANSITION_STALE_MS = 2500;
 const MAX_TRANSITION_QUEUE = 3;
 const DEBUG_KEY = "cleanWindowTransitionDebugV1";
+const LAST_FAILURE_KEY = "cleanWindowLastFailureV1";
+let sessionOperationTail = Promise.resolve();
 const returningPopups = new Set();
 const pendingFullscreenTransitions = new Set();
 const fullscreenMaterializeTimers = new Map();
 const fullscreenReapplyTimers = new Map();
+
+// Every read/modify/write session operation shares this queue. A lifecycle event
+// fired by tabs.move/remove must read the state AFTER its owning transition, not
+// overwrite it later with a snapshot taken before the transition completed.
+function runSessionOperation(operation) {
+  const result = sessionOperationTail.then(operation);
+  sessionOperationTail = result.catch(() => {});
+  return result;
+}
 
 function nativeWindowRequest(type, details = {}) {
   return new Promise((resolve) => {
@@ -29,16 +40,18 @@ function nativeWindowRequest(type, details = {}) {
 
 async function recordTransitionDebug(stage, details = {}) {
   try {
-    await chrome.storage.local.set({
-      [DEBUG_KEY]: {
+    const entry = {
         stage,
+        version: chrome.runtime.getManifest().version,
         at: Date.now(),
         transitionSerial,
         transitionInProgress,
         transitionStartedAt,
         ...details
-      }
-    });
+    };
+    const values = { [DEBUG_KEY]: entry };
+    if (stage === "mode3-failed" || stage === "transition-error") values[LAST_FAILURE_KEY] = entry;
+    await chrome.storage.local.set(values);
   } catch (_) {}
 }
 
@@ -226,8 +239,8 @@ async function sendFullscreenMessage(tabId, enabled) {
   if (response?.ok || !response?.error) return response;
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ["windowed_fullscreen.js"] });
-  } catch (_) {
-    return response;
+  } catch (error) {
+    return { ...response, injectionError: error?.message || String(error) };
   }
   return sendTabMessage(tabId, { type: "set-windowed-fullscreen", enabled });
 }
@@ -505,7 +518,8 @@ async function enterWindowedFullscreen(tab, popup, session, sessions) {
     return {
       ok: false,
       reason: content?.reason || null,
-      error: content?.error || null
+      error: content?.error || null,
+      injectionError: content?.injectionError || null
     };
   }
   session.mode = "windowed-fullscreen";
@@ -525,7 +539,7 @@ function cancelFullscreenReapply(popupId) {
 
 function scheduleFullscreenReapply(popupId, tabId) {
   cancelFullscreenReapply(popupId);
-  const timer = setTimeout(async () => {
+  const timer = setTimeout(() => runSessionOperation(async () => {
     fullscreenReapplyTimers.delete(popupId);
     const latestSessions = await getSessions();
     const latestSession = latestSessions[String(popupId)];
@@ -533,7 +547,7 @@ function scheduleFullscreenReapply(popupId, tabId) {
     const latestTab = await safeGetTab(tabId);
     if (!latestTab || latestTab.windowId !== popupId || latestTab.active !== true) return;
     await sendFullscreenMessage(tabId, true).catch(() => {});
-  }, 120);
+  }).catch(console.error), 120);
   fullscreenReapplyTimers.set(popupId, timer);
 }
 
@@ -787,7 +801,7 @@ function scheduleFullscreenMaterialize(windowId) {
   if (previous) clearTimeout(previous);
   const timer = setTimeout(() => {
     fullscreenMaterializeTimers.delete(windowId);
-    materializeFullscreenMode(windowId).catch(console.error);
+    runSessionOperation(() => materializeFullscreenMode(windowId)).catch(console.error);
   }, 75);
   fullscreenMaterializeTimers.set(windowId, timer);
 }
@@ -795,7 +809,7 @@ function scheduleFullscreenMaterialize(windowId) {
 async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource = "unknown") {
   // Validate the currently focused origin again before taking the lock. A stale
   // command tab from another virtual desktop is not authority to activate it.
-  const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
+  let { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
   if (!window || window.id == null || !tab || tab.id == null) return;
 
   const now = Date.now();
@@ -819,7 +833,12 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   transitionStartedAt = Date.now();
   const mySerial = ++transitionSerial;
   await recordTransitionDebug("start", { windowId: window.id, tabId: tab.id, inputSource });
+  return runSessionOperation(async () => {
   try {
+    const current = await getFocusedContext(window.id, tab.id);
+    if (!current.window || !current.tab) return;
+    window = current.window;
+    tab = current.tab;
     await recordTransitionDebug("ensure-runtime", { windowId: window.id, tabId: tab.id });
     await ensureContentRuntimeCurrent(tab.id).catch(() => {});
     await recordTransitionDebug("recover-sessions", { windowId: window.id, tabId: tab.id });
@@ -886,6 +905,12 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
           });
           await returnToNormalWindow(tab, window, session, sessions);
         } else if (!entered?.ok) {
+          await recordTransitionDebug("mode3-failed", {
+            windowId: window.id, tabId: tab.id,
+            reason: entered?.reason || null,
+            error: String(entered?.error || "No content fullscreen response").slice(0, 300),
+            injectionError: entered?.injectionError ? String(entered.injectionError).slice(0, 300) : null
+          });
           // A temporary runtime/native miss is different from a confirmed
           // no-video page. Preserve Clean mode so a transient failure never
           // ejects the user unexpectedly.
@@ -897,6 +922,11 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
       await recordTransitionDebug("fullscreen-to-normal", { windowId: window.id, tabId: tab.id });
       await returnToNormalWindow(tab, window, session, sessions);
     }
+  } catch (error) {
+    await recordTransitionDebug("transition-error", {
+      windowId: window.id, tabId: tab.id, error: String(error?.message || error).slice(0, 300)
+    });
+    throw error;
   } finally {
     // Only the transition that currently owns the serial may release the lock.
     // This matters when a stale transition finishes after a newer command has
@@ -908,6 +938,7 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
       scheduleQueuedToggle();
     }
   }
+  });
 }
 
 chrome.action.onClicked.addListener((tab) => {
@@ -933,7 +964,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "windowed-fullscreen-video-gone") {
     const popupId = sender.tab?.windowId;
     if (Number.isInteger(popupId)) {
-      getSessions().then(async (sessions) => {
+      runSessionOperation(async () => {
+        const sessions = await getSessions();
         const session = sessions[String(popupId)];
         if (session?.mode === "windowed-fullscreen") {
           await downgradeWindowedFullscreenToClean(popupId, session, sessions);
@@ -945,7 +977,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "return-clean-window-normal-request") {
     const popupId = sender.tab?.windowId;
     const tabId = sender.tab?.id;
-    getSessions().then(async (sessions) => {
+    runSessionOperation(async () => {
+      const sessions = await getSessions();
       const session = sessions[String(popupId)];
       const popup = await safeGetWindow(popupId, true);
       const tab = popup?.tabs?.find((candidate) => candidate.id === tabId)
@@ -959,8 +992,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const popupId = sender.tab?.windowId;
     const tabId = Number(message.tabId);
     if (Number.isInteger(popupId) && Number.isInteger(tabId)) {
-      getSessions()
-        .then((sessions) => switchCleanWindowTab(popupId, tabId, sessions))
+      runSessionOperation(async () => switchCleanWindowTab(popupId, tabId, await getSessions()))
         .then(() => sendResponse({ ok: true }))
         .catch((error) => {
           console.error(error);
@@ -999,7 +1031,7 @@ chrome.tabs.onActivated.addListener(async ({ windowId }) => {
   if (session) await publishSessionState(windowId, session);
 });
 
-chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => runSessionOperation(async () => {
   const sessions = await getSessions();
 
   // 사용자가 자리 지킴이 새 탭에서 검색하거나 사이트를 열기 시작하면
@@ -1021,7 +1053,7 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
       }
     }
   }
-});
+}).catch(console.error));
 
 chrome.tabs.onCreated.addListener(async (tab) => {
   const sessions = await getSessions();
@@ -1032,7 +1064,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => runSessionOperation(async () => {
   const sessions = await getSessions();
   let changed = false;
   for (const [popupKey, session] of Object.entries(sessions)) {
@@ -1049,9 +1081,9 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     }
   }
   if (changed) await saveSessions(sessions);
-});
+}).catch(console.error));
 
-chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
+chrome.tabs.onAttached.addListener((tabId, attachInfo) => runSessionOperation(async () => {
   const sessions = await getSessions();
   let changed = false;
   for (const session of Object.values(sessions)) {
@@ -1062,10 +1094,11 @@ chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
     }
   }
   if (changed) await saveSessions(sessions);
-});
+}).catch(console.error));
 
-chrome.windows.onRemoved.addListener(async (windowId) => {
+chrome.windows.onRemoved.addListener((windowId) => {
   if (returningPopups.has(windowId)) return;
+  return runSessionOperation(async () => {
   const sessions = await getSessions();
   const closedPopupSession = sessions[String(windowId)];
   if (closedPopupSession) {
@@ -1085,6 +1118,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
     }
   }
   if (changed) await saveSessions(sessions);
+  }).catch(console.error);
 });
 
 chrome.windows.onBoundsChanged.addListener((window) => {
@@ -1092,7 +1126,7 @@ chrome.windows.onBoundsChanged.addListener((window) => {
   scheduleFullscreenMaterialize(window.id);
 });
 
-recoverSessions().catch(console.error);
+runSessionOperation(() => recoverSessions()).catch(console.error);
 
 
 chrome.runtime.onInstalled.addListener((details) => {
