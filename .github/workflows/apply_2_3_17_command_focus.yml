@@ -1,0 +1,34 @@
+name: Apply 2.3.17 focused command fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply_2_3_17_command_focus.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 .github/apply_2_3_17_command_focus.py
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          node --check fullscreen_guard.js
+          git diff --check
+      - name: Commit product files
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add background.js windowed_fullscreen.js manifest.json
+          git commit -m 'Release 2.3.17 resolve actual focused command window'
+          git push origin HEAD:main
