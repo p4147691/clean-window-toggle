@@ -744,7 +744,10 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
     }
     else if (session.mode === "clean") {
       const entered = await enterWindowedFullscreen(tab, window, session, sessions);
-      if (!entered) await returnToNormalWindow(tab, window, session, sessions);
+      // A temporary content/runtime miss must never eject the user back to
+      // the parked normal Chrome window. Stay in Clean mode and keep focus
+      // on the exact popup that emitted Alt+C.
+      if (!entered) await publishSessionState(window.id, session).catch(() => {});
     }
     else await returnToNormalWindow(tab, window, session, sessions);
   } finally {

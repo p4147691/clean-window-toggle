@@ -1,5 +1,5 @@
 (() => {
-const RUNTIME_VERSION = "2.3.11";
+const RUNTIME_VERSION = "2.3.12";
 const RUNTIME_KEY = "__cleanWindowRuntimeV1";
 const MESSAGE_BRIDGE_KEY = "__cleanWindowRuntimeMessageBridgeV1";
 const previousRuntime = globalThis[RUNTIME_KEY];
@@ -202,11 +202,6 @@ function renderTabStrip(state) {
     return;
   }
 
-  if ((state.mode || "clean") !== "windowed-fullscreen") {
-    // Background session state is authoritative. If navigation downgraded the
-    // session to Clean mode, remove any stale fullscreen DOM state immediately.
-    clearWindowedFullscreenVisuals(false);
-  }
   document.documentElement.setAttribute(ACTIVE_ATTRIBUTE, "");
   document.documentElement.setAttribute(MODE_ATTRIBUTE, state.mode || "clean");
   installStyles();
