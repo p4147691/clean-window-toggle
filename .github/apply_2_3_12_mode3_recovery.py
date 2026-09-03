@@ -1,0 +1,42 @@
+from pathlib import Path
+
+bg = Path('background.js')
+s = bg.read_text(encoding='utf-8')
+old = '''    else if (session.mode === "clean") {
+      const entered = await enterWindowedFullscreen(tab, window, session, sessions);
+      if (!entered) await returnToNormalWindow(tab, window, session, sessions);
+    }
+'''
+new = '''    else if (session.mode === "clean") {
+      const entered = await enterWindowedFullscreen(tab, window, session, sessions);
+      // A temporary content/runtime miss must never eject the user back to
+      // the parked normal Chrome window. Stay in Clean mode and keep focus
+      // on the exact popup that emitted Alt+C.
+      if (!entered) await publishSessionState(window.id, session).catch(() => {});
+    }
+'''
+if old not in s:
+    raise SystemExit('background mode-3 fallback block not found')
+bg.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+wf = Path('windowed_fullscreen.js')
+s = wf.read_text(encoding='utf-8')
+stale = '''  if ((state.mode || "clean") !== "windowed-fullscreen") {
+    // Background session state is authoritative. If navigation downgraded the
+    // session to Clean mode, remove any stale fullscreen DOM state immediately.
+    clearWindowedFullscreenVisuals(false);
+  }
+'''
+if stale not in s:
+    raise SystemExit('stale clean-shell clearing block not found')
+s = s.replace(stale, '', 1)
+if 'const RUNTIME_VERSION = "2.3.11";' not in s:
+    raise SystemExit('runtime 2.3.11 not found')
+s = s.replace('const RUNTIME_VERSION = "2.3.11";', 'const RUNTIME_VERSION = "2.3.12";', 1)
+wf.write_text(s, encoding='utf-8')
+
+mf = Path('manifest.json')
+s = mf.read_text(encoding='utf-8')
+if '"version": "2.3.11"' not in s:
+    raise SystemExit('manifest 2.3.11 not found')
+mf.write_text(s.replace('"version": "2.3.11"', '"version": "2.3.12"', 1), encoding='utf-8')
