@@ -9,15 +9,11 @@ const transitionQueue = [];
 let transitionSerial = 0;
 const TRANSITION_STALE_MS = 2500;
 const MAX_TRANSITION_QUEUE = 3;
-const CONTENT_FALLBACK_DELAY_MS = 140;
-const CROSS_INPUT_DEDUPE_MS = 500;
 const DEBUG_KEY = "cleanWindowTransitionDebugV1";
 const returningPopups = new Set();
 const pendingFullscreenTransitions = new Set();
 const fullscreenMaterializeTimers = new Map();
 const fullscreenReapplyTimers = new Map();
-const pendingContentToggles = new Map();
-let lastCommandInput = { windowId: null, tabId: null, at: 0 };
 
 function nativeWindowRequest(type, details = {}) {
   return new Promise((resolve) => {
@@ -65,39 +61,6 @@ function scheduleQueuedToggle() {
   }, 35);
 }
 
-function inputKey(windowId, tabId) {
-  return `${windowId}:${tabId}`;
-}
-
-function isRecentCommandInput(windowId, tabId) {
-  return lastCommandInput.windowId === windowId
-    && lastCommandInput.tabId === tabId
-    && Date.now() - lastCommandInput.at < CROSS_INPUT_DEDUPE_MS;
-}
-
-function noteCommandInput(windowId, tabId) {
-  lastCommandInput = { windowId, tabId, at: Date.now() };
-  const key = inputKey(windowId, tabId);
-  const pending = pendingContentToggles.get(key);
-  if (pending) clearTimeout(pending);
-  pendingContentToggles.delete(key);
-}
-
-function scheduleContentFallback(windowId, tabId) {
-  if (!Number.isInteger(windowId) || !Number.isInteger(tabId)) return;
-  if (isRecentCommandInput(windowId, tabId)) return;
-
-  const key = inputKey(windowId, tabId);
-  const previous = pendingContentToggles.get(key);
-  if (previous) clearTimeout(previous);
-  const timer = setTimeout(() => {
-    pendingContentToggles.delete(key);
-    if (isRecentCommandInput(windowId, tabId)) return;
-    toggleCleanWindow(windowId, tabId, "content-fallback").catch(console.error);
-  }, CONTENT_FALLBACK_DELAY_MS);
-  pendingContentToggles.set(key, timer);
-}
-
 async function getSessions() {
   const result = await chrome.storage.local.get(STORAGE_KEY);
   return result[STORAGE_KEY] || {};
@@ -141,31 +104,13 @@ async function getActuallyFocusedContext() {
   }
 }
 
-async function getCommandContext(commandTab) {
-  // The command event identifies the tab that received the user gesture. Its
-  // windowId can become stale while enter/return moves that tab, so refresh the
-  // tab and derive its current window instead of scanning Chrome's focused flag.
-  // That flag can lag behind Windows virtual-desktop switches, especially for a
-  // chrome://newtab popup where no content-script fallback is available.
-  if (Number.isInteger(commandTab?.id)) {
-    const liveTab = await safeGetTab(commandTab.id);
-    const liveWindow = liveTab ? await safeGetWindow(liveTab.windowId, true) : null;
-    const activeTab = liveWindow?.tabs?.find((candidate) => candidate.active);
-    if (liveWindow && liveTab.active === true && activeTab?.id === liveTab.id) {
-      return { window: liveWindow, tab: liveTab };
-    }
-  }
-  return getActuallyFocusedContext();
-}
-
-async function getFocusedContext(preferredWindowId, preferredTabId, trustedCommand = false) {
+async function getFocusedContext(preferredWindowId, preferredTabId) {
   // Alt+C is bound to the window/tab that actually emitted the input event.
   // Never redirect a popup shortcut through getLastFocused(): Chrome can report
   // a previously focused normal window while a Clean Window popup is active.
   if (Number.isInteger(preferredWindowId)) {
     const originWindow = await safeGetWindow(preferredWindowId, true);
-    if (!originWindow || originWindow.id == null
-        || (!trustedCommand && originWindow.focused !== true)) {
+    if (!originWindow || originWindow.id == null || originWindow.focused !== true) {
       return { window: null, tab: null };
     }
 
@@ -257,6 +202,13 @@ async function setMediaPaused(tabIds, paused) {
 }
 
 async function sendFullscreenMessage(tabId, enabled) {
+  const tab = await safeGetTab(tabId);
+  // Browser-owned new-tab/settings pages cannot host our content fullscreen.
+  // This is a known unsupported mode, not a transient messaging failure. Keep
+  // an unknown URL on the existing error path rather than guessing no-video.
+  if (tab?.url && /^(?:chrome(?:-search|-untrusted)?:|chrome-extension:|about:)/i.test(tab.url)) {
+    return enabled ? { ok: false, reason: "unsupported-page" } : { ok: true };
+  }
   await ensureContentRuntimeCurrent(tabId).catch(() => {});
   if (enabled) {
     try {
@@ -841,18 +793,9 @@ function scheduleFullscreenMaterialize(windowId) {
 }
 
 async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource = "unknown") {
-  // Resolve the real origin before taking the global transition lock. Chrome can
-  // briefly emit a stale command event for the parked/previous window after SPA
-  // back navigation. That stale event must not block the valid content-script
-  // request coming from the currently focused Clean Window popup.
-  // A chrome.commands event has already been bound to its live active tab by
-  // getCommandContext(). Do not reject it solely because Chrome's focused flag
-  // still describes a different Windows virtual desktop.
-  const { window, tab } = await getFocusedContext(
-    preferredWindowId,
-    preferredTabId,
-    inputSource === "command"
-  );
+  // Validate the currently focused origin again before taking the lock. A stale
+  // command tab from another virtual desktop is not authority to activate it.
+  const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
   if (!window || window.id == null || !tab || tab.id == null) return;
 
   const now = Date.now();
@@ -934,11 +877,13 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
       } else {
         await recordTransitionDebug("clean-to-windowed-fullscreen", { windowId: window.id, tabId: tab.id });
         const entered = await enterWindowedFullscreen(tab, window, session, sessions);
-        if (!entered?.ok && entered?.reason === "no-video") {
+        if (!entered?.ok && ["no-video", "unsupported-page"].includes(entered?.reason)) {
           // After browser Back/SPA navigation the video can legitimately be gone.
           // Mode 3 is impossible on that page, so skip it instead of trapping the
-          // cycle in mode 2: 1 -> 2 -> (no video) -> 1.
-          await recordTransitionDebug("clean-skip-missing-video-to-normal", { windowId: window.id, tabId: tab.id });
+          // cycle in mode 2: 1 -> 2 -> (no video/unsupported page) -> 1.
+          await recordTransitionDebug("clean-skip-missing-video-to-normal", {
+            windowId: window.id, tabId: tab.id, reason: entered.reason
+          });
           await returnToNormalWindow(tab, window, session, sessions);
         } else if (!entered?.ok) {
           // A temporary runtime/native miss is different from a confirmed
@@ -969,24 +914,20 @@ chrome.action.onClicked.addListener((tab) => {
   toggleCleanWindow(tab?.windowId, tab?.id, "action").catch(console.error);
 });
 
-// 페이지나 주소창 중 어디에 키보드 포커스가 있든 Chrome이 활성 상태이면
-// 공식 commands 경로로 Alt+C를 처리한다. content script의 keydown은
-// popup에서 commands 이벤트가 누락되는 환경을 위한 보조 경로로 유지한다.
-chrome.commands.onCommand.addListener((command, commandTab) => {
+// Use one input owner on both web pages and browser-owned new tabs. Ignore the
+// event's optional tab: it can still describe the previously used Chrome window.
+chrome.commands.onCommand.addListener((command) => {
   if (command !== "toggle-clean-window") return;
-  getCommandContext(commandTab).then(({ window, tab }) => {
+  getActuallyFocusedContext().then(({ window, tab }) => {
     if (!window || !tab) return;
-    noteCommandInput(window.id, tab.id);
     return toggleCleanWindow(window.id, tab.id, "command");
   }).catch(console.error);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "toggle-clean-window-request") {
-    // chrome.commands can be omitted for a popup after the Chrome window was
-    // moved between Windows virtual desktops. Give the official command route
-    // first ownership, then use this exact sender as a narrowly delayed fallback.
-    scheduleContentFallback(sender.tab?.windowId, sender.tab?.id);
+    // Old content runtimes may still send the same gesture. The official command
+    // path owns Alt+C; do not duplicate it with speculative delayed callbacks.
     return false;
   }
   if (message?.type === "windowed-fullscreen-video-gone") {

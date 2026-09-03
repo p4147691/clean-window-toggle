@@ -16,7 +16,7 @@ jobs:
           node --check background.js
           node --check windowed_fullscreen.js
           node --check fullscreen_guard.js
-          node tests/background-input-routing.test.js
+          node --test tests/*.test.js
       - name: Validate manifest
         run: |
-          node -e "const manifest=require('./manifest.json'); if(manifest.version!=='2.3.22') throw new Error('unexpected version')"
+          node -e "const manifest=require('./manifest.json'); if(manifest.manifest_version!==3) throw new Error('expected MV3'); if(!/^\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error('invalid version')"
