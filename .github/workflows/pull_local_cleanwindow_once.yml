@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - '.github/workflows/pull_local_cleanwindow_once.yml'
+      - 'RUNNER_INFO.txt'
+  workflow_dispatch:
 
 jobs:
   pull-local:
@@ -13,7 +15,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Fast-forward local Clean Window clone
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $ErrorActionPreference = 'Stop'
           $repo = 'D:\ChromeExtensions\CleanWindow'
@@ -21,8 +23,38 @@ jobs:
             throw "Not a Git clone: $repo"
           }
           Set-Location -LiteralPath $repo
+          $gitSafe = "safe.directory=$repo"
 
-          $dirty = @(git status --porcelain)
+          # Older DesktopWindow runner-index setup created this exact untracked
+          # pointer inside the Clean Window clone. Migrate only that known payload.
+          # Any different local file remains protected by the dirty-tree gate.
+          $legacyRunnerInfo = Join-Path $repo 'RUNNER_INFO.txt'
+          if (Test-Path -LiteralPath $legacyRunnerInfo) {
+            $trackedRunnerInfo = @(git -c $gitSafe ls-files -- RUNNER_INFO.txt)
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect RUNNER_INFO.txt tracking state.' }
+            if ($trackedRunnerInfo.Count -eq 0) {
+              $legacyExpectedLines = @(
+                'RUNNER INDEX:',
+                'D:\AI_TOOLS\RUNNERS\CleanWindow\RUNNER_INFO.txt',
+                '',
+                'CURRENT SHARED RUNNER LAUNCHER:',
+                'D:\AI_TOOLS\RUNNERS\DesktopWindow\START_RUNNER_HIDDEN.vbs',
+                '',
+                'Read the index file before changing Runner/Bridge configuration.'
+              )
+              $legacyExpected = $legacyExpectedLines -join "`n"
+              $actual = (Get-Content -LiteralPath $legacyRunnerInfo -Raw -Encoding UTF8) -replace "`r`n", "`n" -replace "`r", "`n"
+              if ($actual.Trim() -eq $legacyExpected.Trim()) {
+                Remove-Item -LiteralPath $legacyRunnerInfo -Force
+                Write-Host 'Removed the exact legacy generated Clean Window RUNNER_INFO.txt.'
+              }
+              else {
+                Write-Host 'An untracked RUNNER_INFO.txt exists but does not match the known generated pointer; preserving it.'
+              }
+            }
+          }
+
+          $dirty = @(git -c $gitSafe status --porcelain)
           if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
           if ($dirty.Count -gt 0) {
             Write-Host 'Local tree is dirty; refusing to pull:' -ForegroundColor Yellow
@@ -30,28 +62,48 @@ jobs:
             throw 'Local Clean Window clone has uncommitted changes.'
           }
 
-          $branch = (git branch --show-current).Trim()
+          $branch = (git -c $gitSafe branch --show-current).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'git branch failed' }
           if ($branch -ne 'main') { throw "Expected branch main, found: $branch" }
 
-          $origin = (git remote get-url origin).Trim()
+          $origin = (git -c $gitSafe remote get-url origin).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'git remote get-url origin failed' }
           if ($origin -notmatch 'p4147691[\\/]clean-window-toggle(?:\.git)?$') {
             throw "Unexpected origin: $origin"
           }
 
-          git fetch origin main
+          git -c $gitSafe fetch origin main
           if ($LASTEXITCODE -ne 0) { throw 'git fetch origin main failed' }
 
-          git merge-base --is-ancestor HEAD origin/main
+          git -c $gitSafe merge-base --is-ancestor HEAD origin/main
           if ($LASTEXITCODE -ne 0) {
             throw 'Local HEAD cannot be fast-forwarded safely to origin/main.'
           }
 
-          git pull --ff-only origin main
+          git -c $gitSafe pull --ff-only origin main
           if ($LASTEXITCODE -ne 0) { throw 'git pull --ff-only failed' }
 
-          $head = (git rev-parse HEAD).Trim()
-          $manifest = Get-Content -LiteralPath (Join-Path $repo 'manifest.json') -Raw | ConvertFrom-Json
+          $head = (git -c $gitSafe rev-parse HEAD).Trim()
+          $manifest = Get-Content -LiteralPath (Join-Path $repo 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          if (-not (Test-Path -LiteralPath (Join-Path $repo 'RUNNER_INFO.txt'))) {
+            throw 'Tracked RUNNER_INFO.txt pointer is missing after pull.'
+          }
+
+          node --check .\background.js
+          if ($LASTEXITCODE -ne 0) { throw 'background.js syntax check failed' }
+          node --check .\windowed_fullscreen.js
+          if ($LASTEXITCODE -ne 0) { throw 'windowed_fullscreen.js syntax check failed' }
+          node --test .\tests\background-cycle-regression.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'Clean Window background regression tests failed' }
+
+          $postSyncDirty = @(git -c $gitSafe status --porcelain)
+          if ($LASTEXITCODE -ne 0) { throw 'git status failed after validation' }
+          if ($postSyncDirty.Count -gt 0) {
+            Write-Host 'Post-sync validation unexpectedly dirtied the repository:'
+            $postSyncDirty | ForEach-Object { Write-Host $_ }
+            throw 'Clean Window sync must leave the repository clean.'
+          }
+
           Write-Host "LOCAL_HEAD=$head"
           Write-Host "LOCAL_VERSION=$($manifest.version)"
+          Write-Host 'CLEAN_WINDOW_LOCAL_SYNC_OK'
