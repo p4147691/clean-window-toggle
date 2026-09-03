@@ -1,0 +1,43 @@
+name: Apply 2.3.19 restore settle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply_2_3_19_restore_settle.yml'
+      - '.github/apply_2_3_19_restore_settle.py'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Apply patch
+        run: python .github/apply_2_3_19_restore_settle.py
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          python - <<'PY'
+          import json
+          m=json.load(open('manifest.json', encoding='utf-8'))
+          assert m['version']=='2.3.19'
+          t=open('background.js', encoding='utf-8').read()
+          assert 'waitForRestoredWindowStable' in t
+          assert 'normal-restore-stable' in t
+          print('VALIDATE_2_3_19_OK')
+          PY
+      - name: Commit release
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add background.js manifest.json windowed_fullscreen.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Release 2.3.19 wait for normal-window restore"
+          git push
