@@ -697,11 +697,15 @@ function scheduleFullscreenMaterialize(windowId) {
 }
 
 async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource = "unknown") {
+  // Resolve the real origin before taking the global transition lock. Chrome can
+  // briefly emit a stale command event for the parked/previous window after SPA
+  // back navigation. That stale event must not block the valid content-script
+  // request coming from the currently focused Clean Window popup.
+  const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
+  if (!window || window.id == null || !tab || tab.id == null) return;
   if (transitionInProgress) return;
   transitionInProgress = true;
   try {
-    const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
-    if (!window || window.id == null || !tab || tab.id == null) return;
     await ensureContentRuntimeCurrent(tab.id).catch(() => {});
     const sessions = await recoverSessions();
     const session = sessions[String(window.id)];
