@@ -1,0 +1,22 @@
+name: Validate Clean Window
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate JavaScript and input routing
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          node --check fullscreen_guard.js
+          node tests/background-input-routing.test.js
+      - name: Validate manifest
+        run: |
+          node -e "const manifest=require('./manifest.json'); if(manifest.version!=='2.3.22') throw new Error('unexpected version')"
