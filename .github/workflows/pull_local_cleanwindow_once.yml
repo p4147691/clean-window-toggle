@@ -1,0 +1,57 @@
+name: Pull Clean Window Local Once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pull_local_cleanwindow_once.yml'
+
+jobs:
+  pull-local:
+    runs-on: [self-hosted, Windows, X64, cleanwindow-local]
+    timeout-minutes: 10
+    steps:
+      - name: Fast-forward local Clean Window clone
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D:\ChromeExtensions\CleanWindow'
+          if (-not (Test-Path -LiteralPath (Join-Path $repo '.git'))) {
+            throw "Not a Git clone: $repo"
+          }
+          Set-Location -LiteralPath $repo
+
+          $dirty = @(git status --porcelain)
+          if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
+          if ($dirty.Count -gt 0) {
+            Write-Host 'Local tree is dirty; refusing to pull:' -ForegroundColor Yellow
+            $dirty | ForEach-Object { Write-Host $_ }
+            throw 'Local Clean Window clone has uncommitted changes.'
+          }
+
+          $branch = (git branch --show-current).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'git branch failed' }
+          if ($branch -ne 'main') { throw "Expected branch main, found: $branch" }
+
+          $origin = (git remote get-url origin).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'git remote get-url origin failed' }
+          if ($origin -notmatch 'p4147691[\\/]clean-window-toggle(?:\.git)?$') {
+            throw "Unexpected origin: $origin"
+          }
+
+          git fetch origin main
+          if ($LASTEXITCODE -ne 0) { throw 'git fetch origin main failed' }
+
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Local HEAD cannot be fast-forwarded safely to origin/main.'
+          }
+
+          git pull --ff-only origin main
+          if ($LASTEXITCODE -ne 0) { throw 'git pull --ff-only failed' }
+
+          $head = (git rev-parse HEAD).Trim()
+          $manifest = Get-Content -LiteralPath (Join-Path $repo 'manifest.json') -Raw | ConvertFrom-Json
+          Write-Host "LOCAL_HEAD=$head"
+          Write-Host "LOCAL_VERSION=$($manifest.version)"
