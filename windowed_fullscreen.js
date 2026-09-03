@@ -1,5 +1,5 @@
 (() => {
-const RUNTIME_VERSION = "2.3.12";
+const RUNTIME_VERSION = "2.3.13";
 const RUNTIME_KEY = "__cleanWindowRuntimeV1";
 const MESSAGE_BRIDGE_KEY = "__cleanWindowRuntimeMessageBridgeV1";
 const previousRuntime = globalThis[RUNTIME_KEY];

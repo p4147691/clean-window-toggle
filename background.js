@@ -481,6 +481,10 @@ async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
   session.mode = "clean";
   session.contentFullscreen = false;
   session.frameHidden = false;
+  // Back/navigation from mode 3 intentionally lands in mode 2. The next
+  // toggle should complete the cycle by returning to the normal Chrome window,
+  // instead of immediately re-entering mode 3.
+  session.returnToNormalNext = true;
   sessions[String(popupId)] = session;
   await saveSessions(sessions);
   await publishSessionState(popupId, session).catch(() => {});
@@ -743,11 +747,18 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
       await enterCleanWindow(tab, window, sessions);
     }
     else if (session.mode === "clean") {
-      const entered = await enterWindowedFullscreen(tab, window, session, sessions);
-      // A temporary content/runtime miss must never eject the user back to
-      // the parked normal Chrome window. Stay in Clean mode and keep focus
-      // on the exact popup that emitted Alt+C.
-      if (!entered) await publishSessionState(window.id, session).catch(() => {});
+      if (session.returnToNormalNext === true) {
+        session.returnToNormalNext = false;
+        sessions[String(window.id)] = session;
+        await saveSessions(sessions);
+        await returnToNormalWindow(tab, window, session, sessions);
+      } else {
+        const entered = await enterWindowedFullscreen(tab, window, session, sessions);
+        // A temporary content/runtime miss must never eject the user back to
+        // the parked normal Chrome window. Stay in Clean mode and keep focus
+        // on the exact popup that emitted Alt+C.
+        if (!entered) await publishSessionState(window.id, session).catch(() => {});
+      }
     }
     else await returnToNormalWindow(tab, window, session, sessions);
   } finally {
