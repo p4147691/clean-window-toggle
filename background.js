@@ -508,7 +508,7 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
       await setMediaPaused(session.tabOrder, false);
       // 복귀 과정의 마지막 작업으로 원본 Chrome 창을 활성화한다.
       // 마지막 popup/임시 창이 닫힌 뒤 포커스가 빠지는 것을 방지한다.
-      await showWindow(source.id, useChangedBounds ? bounds : null, true);
+      await showWindow(source.id, useChangedBounds ? bounds : session.sourceBounds, true);
     } else {
       const normal = await chrome.windows.create({
         tabId: tab.id,
