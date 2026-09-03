@@ -5,18 +5,71 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
       - name: Validate JavaScript and input routing
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          node --check background.js
-          node --check windowed_fullscreen.js
-          node --check fullscreen_guard.js
-          node --test tests/*.test.js
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('.\background.js', '.\windowed_fullscreen.js', '.\fullscreen_guard.js')) {
+            node --check $file
+            if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax failed: $file" }
+          }
+          node --test .\tests\background-cycle-regression.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'Background regression suite failed.' }
+
       - name: Validate manifest
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          node -e "const manifest=require('./manifest.json'); if(manifest.manifest_version!==3) throw new Error('expected MV3'); if(!/^\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error('invalid version')"
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content .\manifest.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($manifest.manifest_version -ne 3) { throw 'expected MV3' }
+          if ([string]$manifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid version' }
+
+      - name: Validate Runner pointer and migration contract
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pointer = Get-Content .\RUNNER_INFO.txt -Raw -Encoding UTF8
+          if ($pointer -notmatch 'D:\\AI_TOOLS\\RUNNERS\\CleanWindow\\RUNNER_INFO\.txt') {
+            throw 'Tracked Clean Window Runner pointer is incorrect.'
+          }
+          $sync = Get-Content .\.github\workflows\pull_local_cleanwindow_once.yml -Raw -Encoding UTF8
+          foreach ($required in @(
+            'ls-files -- RUNNER_INFO.txt',
+            'Removed the exact legacy generated Clean Window RUNNER_INFO.txt.',
+            'does not match the known generated pointer; preserving it.',
+            'pull --ff-only origin main',
+            'Post-sync validation unexpectedly dirtied the repository',
+            'node --test .\tests\background-cycle-regression.test.js'
+          )) {
+            if (-not $sync.Contains($required)) { throw "Missing sync safety contract: $required" }
+          }
+          if ($sync.Contains('--error-unmatch')) {
+            throw 'Do not use an intentionally failing git probe under Windows PowerShell Stop semantics.'
+          }
+
+      - name: Verify non-failing untracked probe on Windows PowerShell 5
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:RUNNER_TEMP 'clean-window-untracked-probe'
+          Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $repo | Out-Null
+          Set-Location $repo
+          git init | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          Set-Content -LiteralPath .\RUNNER_INFO.txt -Value 'legacy untracked pointer' -Encoding UTF8
+          $tracked = @(git -c "safe.directory=$repo" ls-files -- RUNNER_INFO.txt)
+          if ($LASTEXITCODE -ne 0) { throw 'Non-failing tracking probe returned an error.' }
+          if ($tracked.Count -ne 0) { throw 'Untracked test file was unexpectedly reported as tracked.' }

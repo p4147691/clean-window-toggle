@@ -1,0 +1,12 @@
+RUNNER INDEX:
+D:\AI_TOOLS\RUNNERS\CleanWindow\RUNNER_INFO.txt
+
+CURRENT SHARED RUNNER:
+C:\actions-runner-desktopwindow
+
+CURRENT EXECUTION MODE:
+shared DesktopWindow Windows Service (runner name SI)
+
+IMPORTANT:
+This tracked file is only a stable project pointer. Runtime/account details belong in the shared runner index outside the repository.
+Do not recreate this file as an untracked local artifact.
