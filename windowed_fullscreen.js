@@ -202,6 +202,11 @@ function renderTabStrip(state) {
     return;
   }
 
+  if ((state.mode || "clean") !== "windowed-fullscreen") {
+    // Background session state is authoritative. If navigation downgraded the
+    // session to Clean mode, remove any stale fullscreen DOM state immediately.
+    clearWindowedFullscreenVisuals(false);
+  }
   document.documentElement.setAttribute(ACTIVE_ATTRIBUTE, "");
   document.documentElement.setAttribute(MODE_ATTRIBUTE, state.mode || "clean");
   installStyles();
