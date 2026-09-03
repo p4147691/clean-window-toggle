@@ -1,0 +1,45 @@
+name: Apply 2.3.20 input queue restore
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply_2_3_20_input_queue_restore.yml'
+      - '.github/apply_2_3_20_input_queue_restore.py'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Apply patch
+        run: python .github/apply_2_3_20_input_queue_restore.py
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check windowed_fullscreen.js
+          python - <<'PY'
+          import json
+          m=json.load(open('manifest.json', encoding='utf-8'))
+          assert m['version']=='2.3.20'
+          t=open('background.js', encoding='utf-8').read()
+          assert 'let transitionRetryCount = 0;' in t
+          assert 'transitionRetryRequested' not in t
+          assert 'queuedCount: transitionRetryCount' in t
+          assert 'waitForRestoredWindowStable(source.id, tab.id, 420)' in t
+          print('VALIDATE_2_3_20_OK')
+          PY
+      - name: Commit release
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add background.js manifest.json windowed_fullscreen.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Release 2.3.20 preserve queued mode transitions"
+          git push
