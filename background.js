@@ -51,6 +51,19 @@ async function safeGetTab(tabId) {
   catch (_) { return null; }
 }
 
+async function getActuallyFocusedContext() {
+  try {
+    const windows = await chrome.windows.getAll({ populate: true });
+    const focusedWindow = windows.find((candidate) => candidate.focused === true);
+    if (!focusedWindow || focusedWindow.id == null) return { window: null, tab: null };
+    const activeTab = focusedWindow.tabs?.find((candidate) => candidate.active);
+    if (!activeTab || activeTab.id == null) return { window: null, tab: null };
+    return { window: focusedWindow, tab: activeTab };
+  } catch (_) {
+    return { window: null, tab: null };
+  }
+}
+
 async function getFocusedContext(preferredWindowId, preferredTabId) {
   // Alt+C is bound to the window/tab that actually emitted the input event.
   // Never redirect a popup shortcut through getLastFocused(): Chrome can report
@@ -704,13 +717,9 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   const { window, tab } = await getFocusedContext(preferredWindowId, preferredTabId);
   if (!window || window.id == null || !tab || tab.id == null) return;
 
-  // Input ownership is mode-specific: normal Chrome uses commands, while an
-  // active Clean Window popup uses only the content-script keydown path. This
-  // prevents the same Alt+C gesture from racing through two asynchronous paths.
-  const currentSessions = await getSessions();
-  const directSession = currentSessions[String(window.id)];
-  if (inputSource === "command" && directSession) return;
-  if (inputSource === "content" && !directSession) return;
+  // Alt+C has one owner: chrome.commands. The content-script keydown remains
+  // only as a legacy safety hook and must not race the command path.
+  if (inputSource === "content") return;
 
   if (transitionInProgress) return;
   transitionInProgress = true;
@@ -786,9 +795,15 @@ chrome.action.onClicked.addListener((tab) => {
 // 페이지나 주소창 중 어디에 키보드 포커스가 있든 Chrome이 활성 상태이면
 // 공식 commands 경로로 Alt+C를 처리한다. content script의 keydown은
 // popup에서 commands 이벤트가 누락되는 환경을 위한 보조 경로로 유지한다.
-chrome.commands.onCommand.addListener((command, tab) => {
+chrome.commands.onCommand.addListener((command) => {
   if (command !== "toggle-clean-window") return;
-  toggleCleanWindow(tab?.windowId, tab?.id, "command").catch(console.error);
+  // The tab attached to a commands event can briefly point at the parked or
+  // previously focused window after popup/navigation transitions. Resolve the
+  // window that is actually focused at the moment of the shortcut instead.
+  getActuallyFocusedContext().then(({ window, tab }) => {
+    if (!window || !tab) return;
+    return toggleCleanWindow(window.id, tab.id, "command");
+  }).catch(console.error);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
