@@ -1,0 +1,72 @@
+name: TEMP Multi-monitor Mode3 Return Probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/_temp_multimonitor_mode3_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run cross-monitor logical isolation probe
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Get-Content '.\tests\background-cycle-regression.test.js' -Raw -Encoding UTF8
+          $extra = @'
+
+          test('Mode 3 popup moved to another monitor must not alter unrelated Chrome windows', async () => {
+            const r = await runtime('https://example.org/video');
+
+            // Model two unrelated normal Chrome windows on the same Windows desktop
+            // but in a second physical-monitor coordinate range.
+            Object.assign(r.windows.get(20), {
+              desktop: 'A', left: 1920, top: 0, width: 1000, height: 760,
+              state: 'normal', focused: false
+            });
+            r.windows.set(40, {
+              id: 40, desktop: 'A', focused: false, type: 'normal', state: 'normal',
+              left: 2050, top: 120, width: 920, height: 720
+            });
+            r.tabs.set(400, {
+              id: 400, windowId: 40, active: true, index: 0,
+              groupId: -1, pinned: false, url: 'https://example.net/other'
+            });
+
+            const before20 = structuredClone(r.windows.get(20));
+            const before40 = structuredClone(r.windows.get(40));
+
+            r.focus(10);
+            await r.command(); // normal -> clean
+            await r.command(); // clean -> mode 3
+            const popupId = r.popupId;
+            assert.equal(r.sessions[popupId].mode, 'windowed-fullscreen');
+
+            // Simulate dragging the Mode 3 popup from monitor 1 into monitor 2.
+            Object.assign(r.windows.get(popupId), {
+              left: 2300, top: 80, width: 1050, height: 700
+            });
+            r.focus(popupId);
+
+            await r.command(); // mode 3 -> normal
+
+            assert.equal(r.tabs.get(100).windowId, 10, 'target YouTube tab must return to its own source');
+            assert.equal(r.windows.has(20), true, 'unrelated window 20 must still exist');
+            assert.equal(r.tabs.get(200).windowId, 20, 'unrelated window 20 tab must remain owned by window 20');
+            assert.deepEqual(r.windows.get(20), before20, 'unrelated window 20 geometry/state must be untouched');
+            assert.equal(r.windows.has(40), true, 'unrelated window 40 must still exist');
+            assert.equal(r.tabs.get(400).windowId, 40, 'unrelated window 40 tab must remain owned by window 40');
+            assert.deepEqual(r.windows.get(40), before40, 'unrelated window 40 geometry/state must be untouched');
+            assert.deepEqual(r.sessions, {}, 'target Clean Window session must finish cleanly');
+          });
+          '@
+          $probe = Join-Path $env:RUNNER_TEMP 'clean-window-multimonitor-probe.test.js'
+          Set-Content -LiteralPath $probe -Value ($base + $extra) -Encoding UTF8
+          node --test $probe
+          if ($LASTEXITCODE -ne 0) { throw 'Multi-monitor Mode 3 logical probe failed.' }
