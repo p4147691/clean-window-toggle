@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Clean Window Toggle",
-  "version": "2.3.9",
+  "version": "2.3.10",
   "description": "주소창과 탭바를 숨기고 작은 Chrome 창 안에서 집중해서 보며, 한 탭 창에서도 원래 Chrome 창 정체성을 안정적으로 보존합니다.",
   "permissions": [
     "tabs",
