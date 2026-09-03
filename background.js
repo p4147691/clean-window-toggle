@@ -488,14 +488,20 @@ async function enterCleanWindow(tab, source, sessions) {
 
 async function enterWindowedFullscreen(tab, popup, session, sessions) {
   const content = await sendFullscreenMessage(tab.id, true);
-  if (!content?.ok) return false;
+  if (!content?.ok) {
+    return {
+      ok: false,
+      reason: content?.reason || null,
+      error: content?.error || null
+    };
+  }
   session.mode = "windowed-fullscreen";
   session.contentFullscreen = true;
   session.frameHidden = false;
   sessions[String(popup.id)] = session;
   await saveSessions(sessions);
   await publishSessionState(popup.id, session);
-  return true;
+  return { ok: true };
 }
 
 function cancelFullscreenReapply(popupId) {
@@ -862,10 +868,18 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
       } else {
         await recordTransitionDebug("clean-to-windowed-fullscreen", { windowId: window.id, tabId: tab.id });
         const entered = await enterWindowedFullscreen(tab, window, session, sessions);
-        // A temporary content/runtime miss must never eject the user back to
-        // the parked normal Chrome window. Stay in Clean mode and keep focus
-        // on the exact popup that emitted Alt+C.
-        if (!entered) await publishSessionState(window.id, session).catch(() => {});
+        if (!entered?.ok && entered?.reason === "no-video") {
+          // After browser Back/SPA navigation the video can legitimately be gone.
+          // Mode 3 is impossible on that page, so skip it instead of trapping the
+          // cycle in mode 2: 1 -> 2 -> (no video) -> 1.
+          await recordTransitionDebug("clean-skip-missing-video-to-normal", { windowId: window.id, tabId: tab.id });
+          await returnToNormalWindow(tab, window, session, sessions);
+        } else if (!entered?.ok) {
+          // A temporary runtime/native miss is different from a confirmed
+          // no-video page. Preserve Clean mode so a transient failure never
+          // ejects the user unexpectedly.
+          await publishSessionState(window.id, session).catch(() => {});
+        }
       }
     }
     else {
