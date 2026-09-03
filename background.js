@@ -4,6 +4,11 @@ const DESKTOP_EXTENSION_ID = "fcjhjgbebcebpdmfedcoabaonhfkjmfo";
 const NO_GROUP = -1;
 
 let transitionInProgress = false;
+let transitionStartedAt = 0;
+let transitionRetryRequested = false;
+let transitionSerial = 0;
+const TRANSITION_STALE_MS = 2500;
+const DEBUG_KEY = "cleanWindowTransitionDebugV1";
 const returningPopups = new Set();
 const pendingFullscreenTransitions = new Set();
 const fullscreenMaterializeTimers = new Map();
@@ -19,6 +24,32 @@ function nativeWindowRequest(type, details = {}) {
       resolve(response || { ok: false, error: "Native helper 응답이 없습니다." });
     });
   });
+}
+
+async function recordTransitionDebug(stage, details = {}) {
+  try {
+    await chrome.storage.local.set({
+      [DEBUG_KEY]: {
+        stage,
+        at: Date.now(),
+        transitionSerial,
+        transitionInProgress,
+        transitionStartedAt,
+        ...details
+      }
+    });
+  } catch (_) {}
+}
+
+function scheduleQueuedToggle() {
+  if (!transitionRetryRequested || transitionInProgress) return;
+  transitionRetryRequested = false;
+  setTimeout(() => {
+    getActuallyFocusedContext().then(({ window, tab }) => {
+      if (!window || !tab) return;
+      return toggleCleanWindow(window.id, tab.id, "command-retry");
+    }).catch(console.error);
+  }, 60);
 }
 
 async function getSessions() {
@@ -721,10 +752,29 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
   // only as a legacy safety hook and must not race the command path.
   if (inputSource === "content") return;
 
-  if (transitionInProgress) return;
+  const now = Date.now();
+  if (transitionInProgress) {
+    if (now - transitionStartedAt < TRANSITION_STALE_MS) {
+      transitionRetryRequested = true;
+      await recordTransitionDebug("queued", { windowId: window.id, tabId: tab.id, inputSource });
+      return;
+    }
+    // A previous transition exceeded the guard interval. Do not leave Alt+C
+    // permanently dead; retire the stale lock and let the freshly focused
+    // command become the new owner. The serial prevents an old finally block
+    // from clearing this newer transition.
+    await recordTransitionDebug("stale-lock-recovered", { windowId: window.id, tabId: tab.id, inputSource });
+    transitionInProgress = false;
+  }
+
   transitionInProgress = true;
+  transitionStartedAt = Date.now();
+  const mySerial = ++transitionSerial;
+  await recordTransitionDebug("start", { windowId: window.id, tabId: tab.id, inputSource });
   try {
+    await recordTransitionDebug("ensure-runtime", { windowId: window.id, tabId: tab.id });
     await ensureContentRuntimeCurrent(tab.id).catch(() => {});
+    await recordTransitionDebug("recover-sessions", { windowId: window.id, tabId: tab.id });
     const sessions = await recoverSessions();
     const session = sessions[String(window.id)];
     const fullscreenPending = await getFullscreenPending();
@@ -766,6 +816,7 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
         await chrome.windows.update(Number(parkedSession[0]), { focused: true }).catch(() => {});
         return;
       }
+      await recordTransitionDebug("enter-clean", { windowId: window.id, tabId: tab.id });
       await enterCleanWindow(tab, window, sessions);
     }
     else if (session.mode === "clean") {
@@ -773,8 +824,10 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
         session.returnToNormalNext = false;
         sessions[String(window.id)] = session;
         await saveSessions(sessions);
+        await recordTransitionDebug("clean-to-normal", { windowId: window.id, tabId: tab.id });
         await returnToNormalWindow(tab, window, session, sessions);
       } else {
+        await recordTransitionDebug("clean-to-windowed-fullscreen", { windowId: window.id, tabId: tab.id });
         const entered = await enterWindowedFullscreen(tab, window, session, sessions);
         // A temporary content/runtime miss must never eject the user back to
         // the parked normal Chrome window. Stay in Clean mode and keep focus
@@ -782,9 +835,20 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
         if (!entered) await publishSessionState(window.id, session).catch(() => {});
       }
     }
-    else await returnToNormalWindow(tab, window, session, sessions);
+    else {
+      await recordTransitionDebug("fullscreen-to-normal", { windowId: window.id, tabId: tab.id });
+      await returnToNormalWindow(tab, window, session, sessions);
+    }
   } finally {
-    transitionInProgress = false;
+    // Only the transition that currently owns the serial may release the lock.
+    // This matters when a stale transition finishes after a newer command has
+    // already taken ownership.
+    if (transitionSerial === mySerial) {
+      transitionInProgress = false;
+      transitionStartedAt = 0;
+      await recordTransitionDebug("finish", { windowId: window.id, tabId: tab.id, inputSource });
+      scheduleQueuedToggle();
+    }
   }
 }
 
