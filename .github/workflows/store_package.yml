@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate extension runtime
         shell: bash
@@ -51,7 +51,7 @@ jobs:
           unzip -l "$PACKAGE"
 
       - name: Upload store package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: clean-window-toggle-${{ env.VERSION }}-chrome-web-store
           path: ${{ env.PACKAGE }}
