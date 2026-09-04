@@ -53,34 +53,23 @@ jobs:
             r.focus(popupB); await r.command(r.tabs.get(200)); assert.equal(r.tabs.get(200).windowId, 20); assert.deepEqual(r.sessions, {});
           });
 
-          test('two Mode 3 sessions sharing one source window must return independently', async () => {
+          test('a source with an existing Mode 3 session must refocus that popup instead of creating a competing session', async () => {
             const r = await runtime('https://example.org/video');
             r.tabs.set(101, { ...r.tabs.get(100), id: 101, active: false, index: 1, url: 'https://example.org/video2' });
-
-            // First tab leaves a multi-tab source, so no anchor is needed yet.
             r.focus(10); await r.command(r.tabs.get(100)); const popupA = r.tabs.get(100).windowId; await r.command(r.tabs.get(100));
             assert.equal(r.sessions[popupA].sourceWindowId, 10);
 
-            // User restores the same source window and turns its remaining tab into another Mode 3 window.
+            // Restore the source and try Alt+C on its remaining tab while A is still parked.
+            // Product contract is one Clean Window session per source window.
             r.windows.get(10).state = 'normal'; r.tabs.get(101).active = true; r.focus(10);
-            await r.command(r.tabs.get(101)); const popupB = r.tabs.get(101).windowId; await r.command(r.tabs.get(101));
-            assert.equal(r.sessions[popupB].sourceWindowId, 10);
-            assert.notEqual(popupA, popupB);
-            assert.equal(r.sessions[popupB].mode, 'windowed-fullscreen');
+            const windowCountBefore = r.windows.size;
+            await r.command(r.tabs.get(101));
 
-            // Move A across monitor coordinates and return it. B must remain alive.
-            Object.assign(r.windows.get(popupA), { left: 2200, top: 70, width: 960, height: 720 }); r.focus(popupA);
-            await r.command(r.tabs.get(100));
-            assert.equal(r.tabs.get(100).windowId, 10);
-            assert.equal(r.tabs.get(101).windowId, popupB);
-            assert.equal(r.windows.has(popupB), true);
-            assert.equal(r.sessions[popupB].mode, 'windowed-fullscreen');
-
-            // Return B afterward; both original tabs must coexist in source 10.
-            r.focus(popupB); await r.command(r.tabs.get(101));
-            assert.equal(r.tabs.get(101).windowId, 10);
-            assert.equal(r.tabs.get(100).windowId, 10);
-            assert.deepEqual(r.sessions, {});
+            assert.equal(r.windows.size, windowCountBefore, 'must not create or destroy another window');
+            assert.equal(r.windows.get(popupA).focused, true, 'existing popup must be refocused');
+            assert.equal(r.tabs.get(101).windowId, 10, 'remaining source tab must stay in source');
+            assert.equal(Object.keys(r.sessions).length, 1, 'must keep exactly one session for the source');
+            assert.equal(r.sessions[popupA].mode, 'windowed-fullscreen');
           });
           '@
           $probe = Join-Path $env:RUNNER_TEMP 'clean-window-multimonitor-probe.test.js'
