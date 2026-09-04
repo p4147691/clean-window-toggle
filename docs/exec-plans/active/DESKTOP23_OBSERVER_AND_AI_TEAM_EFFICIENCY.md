@@ -37,6 +37,27 @@ SetForegroundWindow, Alt+C injection, window activation, and virtual-desktop swi
 
 Success target: `user-focus-interference count = 0`.
 
+## Passive dashboard boundary rule — MUST PRESERVE
+
+A `NOACTIVATE` observer window protects foreground focus, but it does **not** by itself guarantee the window is created on an allowed virtual desktop.
+
+Verified failure on 2026-09-05:
+- the passive `Clean Window Lab Observer` window did not steal foreground focus;
+- however, it appeared on virtual desktop 4, which was outside the assigned 2/3 workspace;
+- therefore this counts as a workspace-boundary failure even though focus-interference remained zero.
+
+New rule:
+- never create/show an observer GUI unless the current virtual desktop is freshly verified as 2 or 3;
+- when current desktop is 1, 4, or any unassigned desktop, remain headless/passive and only update files/logs;
+- do not move an observer window from a forbidden desktop back into scope, because doing so would itself manipulate the forbidden desktop;
+- observer visibility is optional; workspace isolation is mandatory.
+
+Track separately:
+- `user-focus-interference count`
+- `workspace-boundary-interference count`
+
+Both success targets are `0` after this rule is adopted.
+
 ## Existing observability that is currently useful
 
 Clean Window extension state/log keys:
@@ -89,6 +110,17 @@ Current manifest has `scripting` permission and broad declarative content-script
 
 Treat this as a separate bug from the multi-window ownership issue.
 
+### C. Passive observer GUI can violate desktop boundary without stealing focus
+
+The first WPF passive dashboard used non-activating display behavior and foreground verification. It successfully preserved the foreground HWND, but the window was later observed on virtual desktop 4.
+
+Lesson:
+- focus ownership and virtual-desktop ownership are separate safety dimensions;
+- `ShowActivated=false` / no-activate is not sufficient isolation;
+- observer GUI creation must be gated by a fresh desktop-index check before creation.
+
+Do not count this as a Clean Window product bug. It is a test-harness/observer bug and must be included when evaluating the multi-desktop test environment itself.
+
 ## AI TEAM efficiency comparison
 
 Compare two modes of work using real Clean Window tasks.
@@ -111,6 +143,7 @@ Track at minimum:
 - number of rework cycles;
 - user intervention count;
 - user-focus-interference count;
+- workspace-boundary-interference count;
 - bugs found per hour;
 - regressions introduced/detected;
 - parallel work saved versus duplicated work.
@@ -123,7 +156,8 @@ Do not invent percentage improvements. Record actual timestamps/durations first;
 2. Clean Window debugging chat chooses one incident at a time and requests precise evidence.
 3. AI CODE TEAM receives the same evidence packet for parallel analysis/patch work.
 4. Final live verification happens only in desktops 2/3 and only when user focus is not being used elsewhere.
-5. VM/VTL is fallback for risky, destructive, or hard-to-isolate reproductions; real-host evidence wins when safely obtainable.
+5. Observer GUI is created only after the current desktop is freshly verified as 2 or 3; otherwise observer remains headless.
+6. VM/VTL is fallback for risky, destructive, or hard-to-isolate reproductions; real-host evidence wins when safely obtainable.
 
 ## Safety
 
