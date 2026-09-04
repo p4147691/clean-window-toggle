@@ -1,63 +1,91 @@
 # Active Plan — Multi-monitor Mode 3 return affects other Chrome windows
 
-Status: `investigating / VTL L2 repro required`
+Status: `root cause confirmed / source-level patch validated / live Chrome validation pending`
+Updated: 2026-09-05
 
-Reported: 2026-09-04
+## User-observed symptom
 
-## User-observed reproduction
+On Windows with multiple Chrome windows / monitors, returning from Clean Window Mode 3 could make unrelated Chrome windows appear to disappear or change state.
 
-On a multi-monitor Windows desktop:
-1. A YouTube tab/window was already in Clean Window Mode 3 on another screen/window.
-2. The Mode 3 YouTube window was moved across monitors.
-3. `Alt+C` was used to leave Mode 3 / return toward the normal Chrome state.
-4. Other Chrome windows unexpectedly disappeared/closed from the user's view.
+The exact visual symptom must still be described precisely per incident (destroyed vs minimized vs moved vs focus/frame mutation), but the foreground-HWND ownership hazard is no longer only a code-inspection hypothesis.
 
-Treat the exact meaning of "disappeared/closed" as evidence to resolve (actual window destruction vs minimization vs movement/focus/virtual-desktop effect). Do not guess.
+## Confirmed ownership failure
 
-## Newly narrowed structural risk — 2026-09-04
+DesktopWindow Native currently chooses the target of Clean Window frame restore from `GetForegroundWindow()` rather than an explicit transition-owned HWND.
 
-Fresh code inspection confirmed that the shared DesktopWindow Native helper currently chooses the frame target from **`GetForegroundWindow()`** for both Clean Window frame hide and restore operations.
+A live real-host test on the assigned Clean Window workspace reproduced an ownership mismatch:
+- transition target Clean Window HWND: `263012`;
+- after Alt+C return, that HWND remained alive but became minimized (`-32000,-32000` placement);
+- a new normal Chrome HWND appeared;
+- DesktopWindow Native `restore-after` diagnostics recorded a different foreground HWND than the transition-start target.
 
-In particular:
-- `HideCleanWindowFrame(...)` obtains the current foreground HWND and applies `HideFrame(window)`;
-- `RestoreCleanWindowFrame()` again obtains the current foreground HWND and applies `RestoreFrame(window)`;
-- the Clean Window extension requests `restoreCleanWindowFrame` without passing an explicit transition-owned HWND.
+Therefore a Clean Window transition can reach the foreground-based native restore path after foreground ownership has changed.
 
-This creates a plausible ownership hazard in asynchronous multi-window/multi-monitor transitions: if foreground focus moves to a different Chrome window before the helper receives the restore request, the helper may mutate an unrelated Chrome frame instead of the Mode-3 popup that owns the transition.
+This proves the ownership mismatch can occur in real execution. It does not prove every historical window-disappearance report has exactly the same downstream effect.
 
-This is a **hypothesis, not yet a proven root cause**. Do not patch production merely from inspection. The exact HWND/foreground sequence must first be reproduced in isolated Windows and correlated with the existing diagnostics.
+## Current 2.3.24 code fact
+
+Fresh source inspection found `session.frameHidden` assignments only to `false`; there is no current path that sets `frameHidden = true`.
+
+Yet multiple paths still call `restoreCleanWindowFrame` unconditionally. In current 2.3.24 this means a session that never hid a native frame can still ask the foreground-based helper to restore one.
+
+## Minimal patch candidate
+
+Isolated candidate adds `restoreOwnedFrameIfNeeded(session)`:
+- if `session.frameHidden !== true`, native restore is skipped;
+- unconditional restore calls in downgrade, return-to-normal, tab-switch, and failed-switch fallback use the ownership gate;
+- if a legitimate owned restore succeeds, `frameHidden` is cleared.
+
+This is intentionally fail-closed for current 2.3.24. If native frame hiding is reintroduced later, the long-term protocol should carry explicit HWND/token ownership rather than falling back to foreground targeting.
+
+## Regression proof
+
+A new regression test records Native messages and asserts that Mode 3 return sends zero `restoreCleanWindowFrame` requests when the session never hid a frame.
+
+Control case using unmodified 2.3.24:
+- 14 PASS / 1 FAIL;
+- the only failure is `mode 3 return does not restore an unowned native frame`;
+- original code emits 1 restore message where expected count is 0.
+
+Patched isolated candidate:
+- 15 PASS / 0 FAIL;
+- `node --check background.js` PASS.
+
+Local isolated ownership commit: `16f94f4`.
+Remote experiment branch `fix/owned-frame-restore` contains the `activeTab` candidate and a durable evidence copy of the ownership patch because local Git credential state blocked direct push of the local commit.
+
+## Separate runtime-reinjection issue
+
+Do not conflate this bug with the existing-tab runtime recovery permission failure. That issue is tracked separately in `docs/exec-plans/active/RUNTIME_REINJECTION_PERMISSION_GAP.md` and currently has `activeTab` as the least-privilege candidate.
+
+## Test-harness interference to exclude
+
+A DesktopWindow Chrome-for-Testing interactive instance was also observed surfacing outside its intended workspace. That is tracked as a test-harness isolation problem, not a Clean Window product bug. Do not use it as evidence for or against the ownership patch.
 
 ## Safety
 
-- Do not ask the user to repeat a potentially destructive reproduction on the live desktop until isolated tests are exhausted.
-- Do not change production behavior before reproducing or narrowing the fault.
-- Preserve source-anchor/session serialization and the normal 1→2→3→1 cycle.
-- Other unrelated Chrome windows must never be closed, minimized, moved, or frame-mutated by a transition they do not own.
+- GUI actions are allowed only on explicitly assigned virtual desktops 2 and 3.
+- Never steal user foreground focus.
+- Do not touch DesktopWindow dirty working files merely to validate Clean Window.
+- Do not broaden fixed extension/native allowlists.
+- Preserve source-anchor/session serialization and the normal `1→2→3→1` cycle.
+- No reboot/logoff/shutdown without explicit approval.
 
-## Host AutoHotkey reference
+## Next validation — do not redo solved work
 
-The host has external automation capable of affecting Chrome, so it remains an interference layer to distinguish from product behavior. There is no current evidence of a simple direct `Alt+C` registration collision in the reviewed snapshots. Do not assume external automation is inactive without evidence, but do not use it as a catch-all explanation either.
+VTL reproduction is no longer a prerequisite for confirming the ownership mismatch. Use VTL only as fallback if real-host validation becomes unsafe or cannot isolate a remaining question.
 
-## Investigation order
-
-1. Finish the narrow VTL persistent guest interactive bridge and verify installed Chrome can be controlled in the logged-in guest session.
-2. In VTL, create at least two unrelated Chrome windows plus one transition-owned popup and record HWND/window identity before every frame operation.
-3. Move/position the owned popup across the available display geometry or equivalent virtual coordinates, then execute return.
-4. Compare the helper's foreground HWND at `restoreCleanWindowFrame` with the transition-owned popup HWND.
-5. Determine whether any unrelated window was destroyed, minimized, moved, focus-changed, or frame-mutated.
-6. Re-run virtual-desktop/rapid-input variants because focus ownership can change there as well.
-7. Only after a mismatch is proven, change the protocol so the owner is explicit and validate all existing normal cycles.
-
-## Current code observations
-
-- Clean Window returns Mode 3 through `returnToNormalWindow` / `movePopupTabBack` paths.
-- `movePopupTabBack` explicitly removes only its own temporary normal window after target-tab movement.
-- Native frame helper ownership is foreground-based rather than explicit-HWND-based.
-- Existing mock/background regression tests do not prove actual Windows foreground ownership.
+Next required proof:
+1. On desktop 2 or 3 only, verify a designated Clean Window test window is foreground-owned immediately before input.
+2. Validate the ownership-gated candidate in actual Chrome/Windows behavior without touching unrelated windows.
+3. Record before/after HWND, visible/minimized state, bounds, virtual-desktop membership, and Native diagnostics.
+4. Confirm unrelated Chrome windows are unchanged.
+5. Repeat normal video cycle and multi-window/virtual-desktop variants.
+6. Only after live PASS should production/main apply and version bump be considered.
 
 ## Completion criteria
 
-- Determine whether the observed effect is close, minimize, move, focus loss, or frame corruption.
-- Identify the owning layer: Clean Window state machine, DesktopWindow Native frame helper, host external automation, or OS/Chrome interaction.
-- Add a regression test that fails on the proven fault.
-- Apply the smallest safe fix and validate unrelated Chrome windows remain unchanged.
+- source-level defect and regression proof: **complete**;
+- live real-Chrome candidate validation: **pending**;
+- unrelated-window non-interference: **pending final candidate validation**;
+- production merge/version bump: **not yet approved**.
