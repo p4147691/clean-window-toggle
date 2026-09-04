@@ -1,0 +1,109 @@
+diff --git a/background.js b/background.js
+index 86dd01d..0fb6927 100644
+--- a/background.js
++++ b/background.js
+@@ -38,6 +38,17 @@ function nativeWindowRequest(type, details = {}) {
+   });
+ }
+ 
++async function restoreOwnedFrameIfNeeded(session) {
++  // Current 2.3.24 mode 3 does not hide the native Chrome frame. Legacy/defensive
++  // restore calls must therefore never target whichever unrelated Chrome window
++  // happens to be foreground. Only restore when this session explicitly owns a
++  // previously hidden frame.
++  if (session?.frameHidden !== true) return { ok: true, skipped: "frame-not-hidden" };
++  const response = await nativeWindowRequest("restoreCleanWindowFrame");
++  if (response?.ok) session.frameHidden = false;
++  return response;
++}
++
+ async function recordTransitionDebug(stage, details = {}) {
+   try {
+     const entry = {
+@@ -557,7 +568,7 @@ async function downgradeWindowedFullscreenToClean(popupId, session, sessions) {
+   const popup = await safeGetWindow(popupId, true);
+   const activeTab = popup?.tabs?.find((candidate) => candidate.active);
+   if (activeTab?.id != null) await sendFullscreenMessage(activeTab.id, false).catch(() => {});
+-  await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
++  await restoreOwnedFrameIfNeeded(session).catch(() => {});
+   session.mode = "clean";
+   session.contentFullscreen = false;
+   session.frameHidden = false;
+@@ -597,7 +608,7 @@ async function returnToNormalWindow(tab, popup, session, sessions) {
+   const useChangedBounds = boundsChanged(bounds, session.popupInitialBounds || session.sourceBounds);
+   await sendFullscreenMessage(tab.id, false);
+   await sendTabMessage(tab.id, { type: "set-clean-window-shell", active: false });
+-  await nativeWindowRequest("restoreCleanWindowFrame");
++  await restoreOwnedFrameIfNeeded(session);
+ 
+   returningPopups.add(popup.id);
+   try {
+@@ -674,7 +685,7 @@ async function switchCleanWindowTab(popupId, targetTabId, sessions) {
+   try {
+     await setMediaPaused([current.id], true);
+     await sendFullscreenMessage(current.id, false);
+-    await nativeWindowRequest("restoreCleanWindowFrame");
++    await restoreOwnedFrameIfNeeded(session);
+     await movePopupTabBack(current.id, source.id, session.tabMeta[String(current.id)]);
+ 
+     newPopup = await chrome.windows.create({
+@@ -697,7 +708,7 @@ async function switchCleanWindowTab(popupId, targetTabId, sessions) {
+         session.mode = "clean";
+         session.contentFullscreen = false;
+         session.frameHidden = false;
+-        await nativeWindowRequest("restoreCleanWindowFrame").catch(() => {});
++        await restoreOwnedFrameIfNeeded(session).catch(() => {});
+         sessions[String(newPopup.id)] = session;
+         await saveSessions(sessions);
+       }
+diff --git a/tests/background-cycle-regression.test.js b/tests/background-cycle-regression.test.js
+index d9c2b58..73951aa 100644
+--- a/tests/background-cycle-regression.test.js
++++ b/tests/background-cycle-regression.test.js
+@@ -12,12 +12,15 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
+ async function runtime(url = 'chrome://newtab/', options = {}) {
+   let nextWindow = 30, nextTab = 300, nextTimer = 1, desktop = 'A';
+   const timers = new Map(), windows = new Map(), tabs = new Map();
+-  const storage = {}, errors = [], activations = [];
++  const storage = {}, errors = [], activations = [], nativeMessages = [];
+   const lifecycleJobs = [], delayedWrites = [];
+   const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); } });
+   const chrome = {
+     runtime: { getManifest: () => manifest, onMessage: event(), onInstalled: event(),
+-      sendMessage(_id, _message, callback) { callback({ ok: true }); } },
++      sendMessage(_id, _message, callback) {
++        nativeMessages.push(clone(_message));
++        callback({ ok: true });
++      } },
+     commands: { onCommand: event() }, action: { onClicked: event() },
+     storage: { local: { get: async key => ({ [key]: clone(storage[key]) }),
+       set: async values => {
+@@ -137,7 +140,7 @@ async function runtime(url = 'chrome://newtab/', options = {}) {
+   // Diagnostic-only polling is not part of the transition under test.
+   vm.runInContext('waitForRestoredWindowStable = async () => true;', context);
+   await settle();
+-  return { context, windows, tabs, errors, activations,
++  return { context, windows, tabs, errors, activations, nativeMessages,
+     get sessions() { return storage.cleanWindowSessionsV8 || {}; },
+     get lastFailure() { return storage.cleanWindowLastFailureV1; },
+     get popupId() { return tabs.get(100).windowId; }, focus,
+@@ -207,6 +210,19 @@ test('video page keeps 1 -> 2 -> 3 -> 1 and source identity', async () => {
+   await r.command(); assert.equal(r.tabs.get(100).windowId, 10);
+   assert.deepEqual(r.sessions, {});
+ });
++
++test('mode 3 return does not restore an unowned native frame', async () => {
++  const r = await runtime('https://example.org/video');
++  await r.command();
++  await r.command();
++  assert.equal(r.sessions[r.popupId].frameHidden, false);
++  await r.command();
++  assert.equal(
++    r.nativeMessages.filter(message => message?.type === 'restoreCleanWindowFrame').length,
++    0,
++    'foreground-based native restore must not run when this session never hid a frame'
++  );
++});
+ test('confirmed no-video returns; transient web errors keep mode 2', async () => {
+   const empty = await runtime('https://example.org/', { noVideo: true });
+   await empty.command(); await empty.command(); assert.equal(empty.tabs.get(100).windowId, 10);
