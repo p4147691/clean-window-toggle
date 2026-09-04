@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Run cross-monitor logical isolation probe
+      - name: Run cross-monitor and concurrent-session logical isolation probes
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -23,9 +23,6 @@ jobs:
 
           test('Mode 3 popup moved to another monitor must not alter unrelated Chrome windows', async () => {
             const r = await runtime('https://example.org/video');
-
-            // Model two unrelated normal Chrome windows on the same Windows desktop
-            // but in a second physical-monitor coordinate range.
             Object.assign(r.windows.get(20), {
               desktop: 'A', left: 1920, top: 0, width: 1000, height: 760,
               state: 'normal', focused: false
@@ -38,32 +35,66 @@ jobs:
               id: 400, windowId: 40, active: true, index: 0,
               groupId: -1, pinned: false, url: 'https://example.net/other'
             });
-
             const before20 = structuredClone(r.windows.get(20));
             const before40 = structuredClone(r.windows.get(40));
 
             r.focus(10);
-            await r.command(); // normal -> clean
-            await r.command(); // clean -> mode 3
+            await r.command();
+            await r.command();
             const popupId = r.popupId;
             assert.equal(r.sessions[popupId].mode, 'windowed-fullscreen');
-
-            // Simulate dragging the Mode 3 popup from monitor 1 into monitor 2.
-            Object.assign(r.windows.get(popupId), {
-              left: 2300, top: 80, width: 1050, height: 700
-            });
+            Object.assign(r.windows.get(popupId), { left: 2300, top: 80, width: 1050, height: 700 });
             r.focus(popupId);
+            await r.command();
 
-            await r.command(); // mode 3 -> normal
+            assert.equal(r.tabs.get(100).windowId, 10);
+            assert.equal(r.windows.has(20), true);
+            assert.equal(r.tabs.get(200).windowId, 20);
+            assert.deepEqual(r.windows.get(20), before20);
+            assert.equal(r.windows.has(40), true);
+            assert.equal(r.tabs.get(400).windowId, 40);
+            assert.deepEqual(r.windows.get(40), before40);
+            assert.deepEqual(r.sessions, {});
+          });
 
-            assert.equal(r.tabs.get(100).windowId, 10, 'target YouTube tab must return to its own source');
-            assert.equal(r.windows.has(20), true, 'unrelated window 20 must still exist');
-            assert.equal(r.tabs.get(200).windowId, 20, 'unrelated window 20 tab must remain owned by window 20');
-            assert.deepEqual(r.windows.get(20), before20, 'unrelated window 20 geometry/state must be untouched');
-            assert.equal(r.windows.has(40), true, 'unrelated window 40 must still exist');
-            assert.equal(r.tabs.get(400).windowId, 40, 'unrelated window 40 tab must remain owned by window 40');
-            assert.deepEqual(r.windows.get(40), before40, 'unrelated window 40 geometry/state must be untouched');
-            assert.deepEqual(r.sessions, {}, 'target Clean Window session must finish cleanly');
+          test('returning one moved Mode 3 session must leave another Mode 3 session alive', async () => {
+            const r = await runtime('https://example.org/video');
+            Object.assign(r.windows.get(10), { desktop: 'A', left: 100, top: 80, width: 1000, height: 760 });
+            Object.assign(r.windows.get(20), { desktop: 'A', left: 2050, top: 100, width: 1000, height: 760 });
+
+            // Put B into Mode 3 first and leave it running on monitor 2.
+            r.focus(20);
+            await r.command(r.tabs.get(200));
+            const popupB = r.tabs.get(200).windowId;
+            await r.command(r.tabs.get(200));
+            assert.equal(r.sessions[popupB].mode, 'windowed-fullscreen');
+            const beforeB = structuredClone(r.windows.get(popupB));
+
+            // Put A into Mode 3, then move that popup to monitor-2 coordinates.
+            r.focus(10);
+            await r.command(r.tabs.get(100));
+            const popupA = r.tabs.get(100).windowId;
+            await r.command(r.tabs.get(100));
+            assert.equal(r.sessions[popupA].mode, 'windowed-fullscreen');
+            Object.assign(r.windows.get(popupA), { left: 2250, top: 60, width: 980, height: 720 });
+            r.focus(popupA);
+
+            // Returning A must not destroy or complete B's independent session.
+            await r.command(r.tabs.get(100));
+            assert.equal(r.tabs.get(100).windowId, 10, 'A target must return to source 10');
+            assert.equal(r.windows.has(popupB), true, 'B Mode 3 popup must still exist');
+            assert.equal(r.tabs.get(200).windowId, popupB, 'B tab must stay in its Mode 3 popup');
+            assert.equal(r.sessions[popupB].mode, 'windowed-fullscreen', 'B session must remain Mode 3');
+            const afterB = r.windows.get(popupB);
+            for (const key of ['type','state','left','top','width','height']) {
+              assert.equal(afterB[key], beforeB[key], `B popup ${key} must be unchanged`);
+            }
+
+            // B must still be independently returnable afterward.
+            r.focus(popupB);
+            await r.command(r.tabs.get(200));
+            assert.equal(r.tabs.get(200).windowId, 20, 'B target must return to source 20');
+            assert.deepEqual(r.sessions, {}, 'both sessions must finish independently');
           });
           '@
           $probe = Join-Path $env:RUNNER_TEMP 'clean-window-multimonitor-probe.test.js'
