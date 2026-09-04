@@ -121,6 +121,32 @@ Lesson:
 
 Do not count this as a Clean Window product bug. It is a test-harness/observer bug and must be included when evaluating the multi-desktop test environment itself.
 
+### D. DesktopWindow Chrome-for-Testing window surfaced into the visible workspace
+
+A visible `Google Chrome for Testing` login/onboarding window was observed during normal user activity.
+
+Read-only process inspection identified the exact test instance:
+- executable: `D:\AI_TOOLS\ChromeForTesting\152.0.7977.82\chrome-win64\chrome.exe`
+- profile: `D:\AI_TOOLS\ChromeProfiles\DesktopWindow-CfT`
+- remote debugging port: `9227`
+- loaded unpacked extension: `D:\ChromeExtensions\DesktopWindow\extension`
+- launcher source: `D:\ChromeExtensions\DesktopWindow\tools\Start-DesktopWindowTestChrome.ps1`
+
+The launcher itself already defaults to `--headless=new`; a visible browser requires its explicit `-Interactive` branch, which verifies a bound virtual-desktop id, starts Chrome minimized, then moves its windows to that bound desktop. Therefore the surfaced window is not evidence that headless mode itself opens UI. It is evidence that an interactive DesktopWindow test instance later became visible in the user's workspace despite the intended isolation.
+
+Classification:
+- layer: test harness / DesktopWindow test-browser lifecycle
+- Clean Window product bug: no
+- workspace-boundary interference: yes
+- user-focus interference: not proven from this incident alone
+- confidence: high for process/launcher attribution; medium for the exact later restore/visibility trigger
+
+Next verification:
+- preserve the current DesktopWindow dirty working files;
+- do not launch another interactive test browser while the user is active;
+- correlate the process creation time and any later restore/show event with DesktopWindow Native diagnostics and runner logs;
+- future unified watcher must record test-browser process identity, desktop membership, visible/minimized state, and the event that first makes a hidden/minimized test window visible.
+
 ## AI TEAM efficiency comparison
 
 Compare two modes of work using real Clean Window tasks.
