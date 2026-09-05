@@ -32,3 +32,10 @@ Fresh-check current code, workflow triggers, live extension version/reload state
 ## Validation
 
 Distinguish source-level success from actual Chrome/window behavior. For focus, titlebar, virtual-desktop, window-mode, or hotkey issues, prefer isolated real-execution testing where practical before repeated manual user checks.
+
+## Shared GUI automation policy
+
+- Use VTL `D:\AI_TOOLS\VIRTUAL-TEST-LAB\tools\gui-broker\Invoke-GuiBroker.ps1` for ChatGPT-driven live Windows GUI manipulation.
+- Existing-window UIA work must bind exact HWND/PID/session/virtual-desktop identity. Live mutation requires a short-lived action-scoped approval token.
+- Product code may intentionally focus a Clean Window after the user's Alt+C; do not confuse that product behavior with automation permission.
+- Automated new-window, browser-internal/DevTools, installer/elevation, drag, or SendInput tests run in VTL/VM rather than the user's active desktop.
