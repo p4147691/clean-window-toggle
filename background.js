@@ -1,6 +1,7 @@
 const STORAGE_KEY = "cleanWindowSessionsV8";
 const FULLSCREEN_PENDING_KEY = "cleanWindowFullscreenPendingV1";
 const DESKTOP_EXTENSION_ID = "fcjhjgbebcebpdmfedcoabaonhfkjmfo";
+const DESKTOP_WINDOW_PAGE_PREFIX = `chrome-extension://${DESKTOP_EXTENSION_ID}/desktop.html`;
 const NO_GROUP = -1;
 
 let transitionInProgress = false;
@@ -806,6 +807,42 @@ function scheduleFullscreenMaterialize(windowId) {
   fullscreenMaterializeTimers.set(windowId, timer);
 }
 
+
+function isDesktopWindowTab(tab) {
+  const url = typeof tab?.url === "string" ? tab.url : "";
+  return url === DESKTOP_WINDOW_PAGE_PREFIX
+    || url.startsWith(DESKTOP_WINDOW_PAGE_PREFIX + "?")
+    || url.startsWith(DESKTOP_WINDOW_PAGE_PREFIX + "#");
+}
+
+async function toggleDesktopWindowCleanMode(tab, window) {
+  if (!isDesktopWindowTab(tab)) return false;
+  const bounds = getBounds(window);
+
+  // DesktopWindow is already equivalent to Clean Window mode 2: a popup with
+  // browser chrome removed. It is not a video page, so Alt+C must never advance
+  // it into mode 3. Instead DesktopWindow has a strict 1 <-> 2 cycle.
+  if (window?.type === "popup") {
+    const normal = await chrome.windows.create({
+      tabId: tab.id, type: "normal", focused: true, ...(bounds || {})
+    });
+    if (!Number.isInteger(normal?.id)) throw new Error("DesktopWindow을 일반 Chrome 창으로 전환하지 못했습니다.");
+    await recordTransitionDebug("desktop-window-2-to-1", { fromWindowId: window.id, toWindowId: normal.id, tabId: tab.id });
+    return true;
+  }
+
+  if (window?.type === "normal") {
+    const popup = await chrome.windows.create({
+      tabId: tab.id, type: "popup", focused: true, ...(bounds || {})
+    });
+    if (!Number.isInteger(popup?.id)) throw new Error("DesktopWindow을 Clean Window로 전환하지 못했습니다.");
+    await recordTransitionDebug("desktop-window-1-to-2", { fromWindowId: window.id, toWindowId: popup.id, tabId: tab.id });
+    return true;
+  }
+
+  return true;
+}
+
 async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource = "unknown") {
   // Validate the currently focused origin again before taking the lock. A stale
   // command tab from another virtual desktop is not authority to activate it.
@@ -843,6 +880,7 @@ async function toggleCleanWindow(preferredWindowId, preferredTabId, inputSource 
     await ensureContentRuntimeCurrent(tab.id).catch(() => {});
     await recordTransitionDebug("recover-sessions", { windowId: window.id, tabId: tab.id });
     const sessions = await recoverSessions();
+    if (await toggleDesktopWindowCleanMode(tab, window)) return;
     const session = sessions[String(window.id)];
     const fullscreenPending = await getFullscreenPending();
     const pendingRequest = fullscreenPending[String(window.id)];
